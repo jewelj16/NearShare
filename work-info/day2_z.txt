@@ -1,0 +1,14 @@
+Here's a quick rundown of what I got done for Day 2.
+
+I spent today laying out the foundational data structures for the transfer engine. There's no crazy network logic yet, just getting the core objects ready so we have a clean way to pass data around.
+
+Here are the main pieces I put together:
+
+- **PeerInfo & DeviceId:** Created these to keep track of other devices on the network. It holds all the basics like the device's IP, port, display name, and the last time we saw them.
+- **FileMetadata:** A simple object that holds the info of a file we're trying to send, like its name, size, and hash. I also set it up so it automatically calculates how many chunks the file needs to be broken into based on its size.
+- **Chunk:** A tiny structure to represent the actual pieces of file data being sent over the network.
+- **TransferSession:** This is the big one. It tracks the entire state of a transfer (whether it's connecting, transferring, complete, etc.). I also added a way for it to keep track of exactly which chunks have been acknowledged, so it knows if anything is missing and needs to be resent.
+
+To make sure everything is rock solid before we start building on top of it, I wrote a bunch of unit tests. They check things like making sure the chunk math is right and that the transfer session correctly flags when all chunks of a file have been received. 
+
+Ran the test suite and all 51 tests passed green. I kept everything strictly in pure Python without needing to pull in any outside libraries. The base is looking solid!
