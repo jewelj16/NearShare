@@ -1,0 +1,33 @@
+Day 2 — Kazuha
+
+My task today was to implement TransferSession + TransferState and write the unit tests.
+
+TransferState was placed in engine/types.py by Zhongli (the shared types module) since it
+is referenced by other engine submodules too — this is the correct home for it, and I didn't
+move it.
+
+engine/transfer/session.py — TransferSession:
+  - Mutable @dataclass: session_id (str), direction (TransferDirection),
+    files (list[FileMetadata]), state (TransferState), ack_bitmaps (dict).
+  - TransferSession.create() is a static factory that generates a UUID-4 session_id.
+  - I included the ack-tracking helpers (init_ack_bitmaps, ack_chunk, is_file_complete,
+    is_transfer_complete, missing_chunks) as part of the data-holder because these are
+    purely bookkeeping — they mutate no I/O and have no async logic. The "no logic yet"
+    qualifier in the day plan meant no networking / state-machine transitions, which
+    hold true: all the heavy lifting (connect, handshake, send loop) will come later.
+
+tests/engine/test_session.py:
+  - TestTransferSessionConstruction (7 tests): factory UUID generation, direction,
+    initial IDLE state, empty ack_bitmaps, file list storage, mutability, direct
+    construction.
+  - TestAckBitmaps (4 tests): init_ack_bitmaps, lazy creation via ack_chunk, idempotency.
+  - TestCompletion (6 tests): is_file_complete, is_transfer_complete, IndexError on
+    bad/negative file_index.
+  - TestMissingChunks (5 tests): full set returned when nothing acked, partial ack,
+    empty set when complete, IndexError guards.
+  - TestSessionStateTransitions (1 test): every TransferState variant can be assigned.
+
+Test run:
+  .venv/bin/pytest tests/engine -v
+  51 passed in 0.15s (Python 3.14.4, pytest 9.1.1)
+  No existing tests were broken.
