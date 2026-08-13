@@ -1,0 +1,12 @@
+Hey, here is a quick summary of what I worked on for Day 3.
+
+Today was all about how our devices will actually talk to each other over the network. I built the "Protocol Codec", which is basically a translator that takes our messages and packs them into a raw binary format that can be safely sent over Wi-Fi.
+
+Here is exactly what I put together:
+
+- **Message Types:** I added a simple list (enum) of all the different message types our app will send, like "HELLO", "METADATA", "CHUNK", and "ERROR". This perfectly matches the architecture Kazuha mapped out.
+- **The Frame Packer (Codec):** I wrote the code that wraps every message in a standard "frame". Each frame starts with exactly 4 bytes telling the receiver how long the message is, followed by 1 byte saying what type of message it is, and then the actual message payload. It also guarantees we never send a payload larger than 64 MiB at once.
+- **Stream Reading Support:** Network data often arrives in unpredictable chunks. I made a helper function that reads just the 5-byte header first, so the system knows exactly how much more data it needs to wait for before it has a complete message.
+- **Tests:** I wrote 28 new tests to make sure that if we pack a message and unpack it again, it stays exactly the same. I also threw a bunch of garbage data at it (like cut-off messages or unknown message types) to make sure it gracefully throws an error instead of crashing.
+
+All 79 tests are passing green, and I kept it completely dependency-free using built-in Python tools. We are ready to start building the actual network interfaces next!
