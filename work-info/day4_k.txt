@@ -1,0 +1,17 @@
+Quick notes on what I got done for Day 4.
+
+Today I built the file chunker, which is the piece that actually breaks a file into smaller pieces before we send them across the network.
+
+Here's what it does:
+
+- **Chunker.split()** takes a file's raw bytes and chops them into chunk-sized pieces based on whatever chunk size was negotiated in the metadata (defaults to 256 KB). It's written as a Python generator, so it yields one chunk at a time instead of loading everything into a giant list.
+
+- Each chunk gets its own SHA-256 hash computed right there as it's being sliced. This is important because the receiving side can verify each chunk individually, rather than waiting until the whole file arrives to check if something got corrupted.
+
+- The last chunk of a file can be smaller than the standard chunk size, obviously. If a file is 2500 bytes and chunks are 1000 bytes, you get two full chunks and one 500-byte chunk at the end.
+
+- I also made sure it handles the edge case where a file is really small, like 1 KB. With the default 256 KB chunk size, that whole file fits into a single partial chunk, and everything still works fine.
+
+- Empty files (zero bytes) produce zero chunks, which is the correct behavior.
+
+Wrote 16 tests covering all these cases. The full suite is now at 116 tests, all green.
