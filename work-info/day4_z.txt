@@ -1,0 +1,17 @@
+Summary of what I worked on for Day 4.
+
+Today I built the testing infrastructure that lets us test the entire transfer engine without needing two actual devices on a real network. Think of it like a flight simulator for our protocol.
+
+Here's what I put together:
+
+- **FakeTransport & FakeConnection:** These are mock versions of our real network layer. Instead of going through actual TCP sockets, two "connections" are just linked by a pair of in-memory queues. When one side sends a frame, it shows up instantly on the other side. This means we can test the full send/receive flow in under a second, with zero network setup.
+
+- **FaultConfig (the cool part):** This is what makes the fakes really useful. You can configure them to simulate bad network conditions:
+  - **drop_rate** — a percentage chance that a sent frame just vanishes, like it would on a flaky Wi-Fi connection.
+  - **duplicate_rate** — a chance that a frame gets delivered twice, which is a real thing that happens with TCP retransmits at lower layers.
+  - **delay_s** — adds a fixed delay before delivery, so we can test timeout behavior.
+  - **rng_seed** — makes the randomness deterministic. Same seed = same drops every time, which means our tests are reproducible.
+
+- **FakeDiscovery:** Instead of broadcasting UDP packets to find other devices, peers are injected manually. I also added a helper to inject "stale" peers (ones that haven't been seen in a while), so we can verify that the liveness timeout filtering works correctly.
+
+Wrote 21 tests covering the basic lifecycle, all three fault modes, deterministic behavior, peer injection, stale eviction, and dedup. All 100 tests in the repo pass green.
