@@ -1,22 +1,94 @@
 """Tests for engine.transfer.retransmit — missing-chunk retransmission
-with FakeTransport packet loss."""
+with FakeTransport packet loss and corrupted-chunk detection."""
+
+import hashlib
 
 import pytest
 
+from engine.integrity.hasher import chunk_hash
 from engine.transfer.retransmit import (
+    CorruptChunkError,
     RetransmitController,
     RetransmitError,
     RetransmitRequest,
     compute_retransmit_requests,
+    detect_corrupt_chunk,
+    verify_chunk,
 )
 from engine.transfer.retry import RetryPolicy
-from engine.types import DEFAULT_CHUNK_SIZE, FileMetadata
+from engine.types import Chunk, DEFAULT_CHUNK_SIZE, FileMetadata
 
 
 # Helpers
 
 def _file(name: str = "f.bin", size: int = DEFAULT_CHUNK_SIZE * 4) -> FileMetadata:
     return FileMetadata(name=name, size=size)
+
+
+def _chunk(seq: int = 0, data: bytes = b"hello", file_index: int = 0) -> Chunk:
+    return Chunk(
+        transfer_id="sess-1",
+        file_index=file_index,
+        seq=seq,
+        data=data,
+        sha256=chunk_hash(data),
+    )
+
+
+def _corrupt_chunk(seq: int = 0, data: bytes = b"hello") -> Chunk:
+    """Create a chunk whose sha256 does NOT match its data."""
+    return Chunk(
+        transfer_id="sess-1",
+        file_index=0,
+        seq=seq,
+        data=data,
+        sha256="0" * 64,  # wrong hash
+    )
+
+
+# verify_chunk
+
+class TestVerifyChunk:
+    """Per-chunk hash verification."""
+
+    def test_valid_chunk(self) -> None:
+        c = _chunk(data=b"good data")
+        assert verify_chunk(c) is True
+
+    def test_corrupt_chunk(self) -> None:
+        c = _corrupt_chunk(data=b"good data")
+        assert verify_chunk(c) is False
+
+    def test_empty_data(self) -> None:
+        c = _chunk(data=b"")
+        assert verify_chunk(c) is True
+
+
+# detect_corrupt_chunk
+
+class TestDetectCorruptChunk:
+    """Corruption detection returns error details or None."""
+
+    def test_no_corruption(self) -> None:
+        c = _chunk(data=b"valid")
+        assert detect_corrupt_chunk(c) is None
+
+    def test_corruption_detected(self) -> None:
+        c = _corrupt_chunk(data=b"valid")
+        err = detect_corrupt_chunk(c)
+        assert err is not None
+        assert isinstance(err, CorruptChunkError)
+        assert err.seq == 0
+        assert err.file_index == 0
+        assert err.expected == "0" * 64
+        assert err.actual == chunk_hash(b"valid")
+
+    def test_corruption_error_message(self) -> None:
+        c = _corrupt_chunk(seq=3, data=b"x")
+        err = detect_corrupt_chunk(c)
+        assert err is not None
+        assert "hash mismatch" in str(err)
+        assert "0:3" in str(err)
 
 
 # compute_retransmit_requests

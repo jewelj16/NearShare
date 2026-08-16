@@ -1,22 +1,84 @@
-"""Missing-chunk retransmission using ACK bitmaps and RetryPolicy.
+"""Missing-chunk retransmission and corrupted-chunk detection.
 
-Provides the retransmission logic that uses the ACK bitmap from a
+Provides the retransmission loop that uses the ACK bitmap from a
 TransferSession to identify missing chunks and re-send them, with
-exponential backoff via RetryPolicy.
+exponential backoff via RetryPolicy.  Also detects per-chunk hash
+mismatches and triggers targeted retransmission.
 
 See docs/architecture/protocol.md §3.6 (CHUNK) and §3.7 (ACK).
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
+from engine.integrity.hasher import chunk_hash
 from engine.transfer.retry import RetryPolicy, RetryExhaustedError
-from engine.types import FileMetadata
+from engine.types import Chunk, FileMetadata
 
 
 class RetransmitError(Exception):
     """Raised when retransmission ultimately fails."""
+
+
+class CorruptChunkError(Exception):
+    """Raised when a received chunk's SHA-256 does not match its data.
+
+    Attributes:
+        file_index: Index of the file the chunk belongs to.
+        seq:        Sequence number of the corrupted chunk.
+        expected:   The hash declared in the Chunk header.
+        actual:     The hash computed from the received data.
+    """
+
+    def __init__(
+        self,
+        file_index: int,
+        seq: int,
+        expected: str,
+        actual: str,
+    ) -> None:
+        self.file_index = file_index
+        self.seq = seq
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f"Chunk {file_index}:{seq} hash mismatch: "
+            f"expected {expected[:16]}…, got {actual[:16]}…"
+        )
+
+
+def verify_chunk(chunk: Chunk) -> bool:
+    """Verify a chunk's per-chunk SHA-256.
+
+    Args:
+        chunk: The received chunk.
+
+    Returns:
+        True if the hash matches.
+    """
+    return chunk_hash(chunk.data) == chunk.sha256
+
+
+def detect_corrupt_chunk(chunk: Chunk) -> CorruptChunkError | None:
+    """Check a chunk for corruption, returning an error if found.
+
+    Args:
+        chunk: The chunk to verify.
+
+    Returns:
+        A CorruptChunkError if corruption is detected, else None.
+    """
+    actual = chunk_hash(chunk.data)
+    if actual != chunk.sha256:
+        return CorruptChunkError(
+            file_index=chunk.file_index,
+            seq=chunk.seq,
+            expected=chunk.sha256,
+            actual=actual,
+        )
+    return None
 
 
 @dataclass
