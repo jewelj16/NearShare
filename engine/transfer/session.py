@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass, field
 
@@ -34,6 +35,7 @@ class TransferSession:
     files: list[FileMetadata]
     state: TransferState = TransferState.IDLE
     ack_bitmaps: dict[int, set[int]] = field(default_factory=dict)
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     # factories
 
@@ -56,10 +58,24 @@ class TransferSession:
         self.ack_bitmaps = {i: set() for i in range(len(self.files))}
 
     def ack_chunk(self, file_index: int, seq: int) -> None:
-        """Record that chunk *seq* of *file_index* has been acknowledged."""
+        """Record that chunk *seq* of *file_index* has been acknowledged.
+
+        This is the synchronous version — safe for single-threaded use.
+        For concurrent asyncio tasks, use :meth:`ack_chunk_safe` instead.
+        """
         if file_index not in self.ack_bitmaps:
             self.ack_bitmaps[file_index] = set()
         self.ack_bitmaps[file_index].add(seq)
+
+    async def ack_chunk_safe(self, file_index: int, seq: int) -> None:
+        """Record a chunk ACK under the session lock.
+
+        Use this instead of :meth:`ack_chunk` when multiple asyncio tasks
+        may be acknowledging chunks concurrently.  The asyncio.Lock
+        serialises access to the bitmap dict.
+        """
+        async with self._lock:
+            self.ack_chunk(file_index, seq)
 
     def is_file_complete(self, file_index: int) -> bool:
         """Return True if all chunks for *file_index* have been acked."""
