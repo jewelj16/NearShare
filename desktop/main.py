@@ -1,7 +1,9 @@
-import sys
+"""NearShare Desktop — entry point.
 
-def main():
-    print("NearShare Desktop Engine - Coming Soon")
+Delegates to the CLI parser in desktop.cli.
+"""
+
+from desktop.cli import main
 
 if __name__ == "__main__":
     main()
