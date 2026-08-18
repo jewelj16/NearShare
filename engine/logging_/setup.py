@@ -77,11 +77,8 @@ def setup_engine_logging(
         handler.setLevel(level)
         formatter = logging.Formatter(fmt)
         handler.setFormatter(formatter)
+        handler.addFilter(SessionFilter())
         logger.addHandler(handler)
-
-    # add session filter (idempotent — check first)
-    if not any(isinstance(f, SessionFilter) for f in logger.filters):
-        logger.addFilter(SessionFilter())
 
     return logger
 
