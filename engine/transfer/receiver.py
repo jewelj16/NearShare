@@ -71,11 +71,13 @@ class TransferReceiver:
     async def run(
         self,
         conn: object,
+        on_progress: Callable[[int, int], None] | None = None,
     ) -> TransferResult:
         """Execute the full receiver flow on an open connection.
 
         Args:
             conn: A Connection-like object with send_frame/recv_frame.
+            on_progress: Optional callback invoked with (bytes_done, total_bytes).
 
         Returns:
             A TransferResult describing the outcome.
@@ -100,6 +102,7 @@ class TransferReceiver:
 
             session_id, metadatas = parse_metadata_payload(meta_frame.payload)
             set_session_id(session_id)
+            total_transfer_bytes = sum(m.size for m in metadatas)
 
             session = TransferSession(
                 session_id=session_id,
@@ -149,10 +152,13 @@ class TransferReceiver:
                 )
             sm.transition(TransferState.TRANSFERRING)
             logger.info("Transfer started")
+            
+            if on_progress:
+                on_progress(0, total_transfer_bytes)
 
             # ── chunk loop ────────────────────────────────────────────────
             bytes_received = await self._receive_all_files(
-                conn, session, metadatas
+                conn, session, metadatas, on_progress, total_transfer_bytes
             )
 
             # ── write files to disk ───────────────────────────────────────
@@ -166,6 +172,9 @@ class TransferReceiver:
                 bytes_received,
                 len(saved_paths),
             )
+            
+            if on_progress:
+                on_progress(total_transfer_bytes, total_transfer_bytes)
 
             return TransferResult.success(
                 session_id=session_id,
@@ -215,6 +224,8 @@ class TransferReceiver:
         conn: object,
         session: TransferSession,
         metadatas: list[FileMetadata],
+        on_progress: Callable[[int, int], None] | None,
+        total_transfer_bytes: int,
     ) -> int:
         """Receive chunks for all files and send ACKs.
 
@@ -254,6 +265,9 @@ class TransferReceiver:
             session.ack_chunk(chunk.file_index, chunk.seq)
             tracker.ack(chunk.file_index, chunk.seq)
             bytes_received += len(chunk.data)
+            
+            if on_progress:
+                on_progress(bytes_received, total_transfer_bytes)
 
             # send ACK for this file
             ack_payload = build_ack_payload(
