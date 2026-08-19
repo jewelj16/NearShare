@@ -1,8 +1,10 @@
 """NearShare CLI — command-line interface for sending and receiving files.
 
 Usage:
-  nearshare send <file1> [<file2> ...] --host <ip> [--port <port>]
-  nearshare receive [--save-dir <dir>] [--port <port>] [--auto-accept]
+  nearshare init <file1> [<file2> ...]           # create hotspot + send (auto)
+  nearshare send <file1> [<file2> ...] --host <ip> [--port <port>]  # direct send
+  nearshare receive [--save-dir <dir>] [--auto-accept]              # auto-discover + receive
+  nearshare receive --listen [--port <port>]                        # manual listen mode
 """
 
 from __future__ import annotations
@@ -36,8 +38,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # ── send ──────────────────────────────────────────────────────────────
-    send_p = sub.add_parser("send", help="Send files to a peer")
+    # ── init (auto-discovery sender) ─────────────────────────────────────
+    init_p = sub.add_parser(
+        "init",
+        help="Create a hotspot and send files (auto-discovery mode)",
+    )
+    init_p.add_argument(
+        "files",
+        nargs="+",
+        type=Path,
+        help="Files to send",
+    )
+    init_p.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"TCP port to listen on (default {DEFAULT_PORT})",
+    )
+    init_p.add_argument(
+        "--name",
+        default=None,
+        help="Display name for this device (default: hostname)",
+    )
+
+    # ── send (direct mode) ───────────────────────────────────────────────
+    send_p = sub.add_parser("send", help="Send files to a peer (direct mode)")
     send_p.add_argument(
         "files",
         nargs="+",
@@ -61,8 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Display name for this device (default: hostname)",
     )
 
-    # ── receive ───────────────────────────────────────────────────────────
-    recv_p = sub.add_parser("receive", help="Wait for incoming transfers")
+    # ── receive ──────────────────────────────────────────────────────────
+    recv_p = sub.add_parser("receive", help="Receive files from a peer")
     recv_p.add_argument(
         "--save-dir",
         type=Path,
@@ -73,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--port",
         type=int,
         default=DEFAULT_PORT,
-        help=f"TCP port to listen on (default {DEFAULT_PORT})",
+        help=f"TCP port to listen on / connect to (default {DEFAULT_PORT})",
     )
     recv_p.add_argument(
         "--auto-accept",
@@ -81,9 +106,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Automatically accept all incoming transfers",
     )
     recv_p.add_argument(
+        "--listen",
+        action="store_true",
+        help="Listen mode: wait for direct connections instead of scanning for hotspots",
+    )
+    recv_p.add_argument(
         "--name",
         default=None,
         help="Display name for this device (default: hostname)",
+    )
+    recv_p.add_argument(
+        "--scan-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds to scan for NearShare hotspots (default 30)",
     )
 
     return parser
@@ -112,22 +148,43 @@ def _get_display_name(override: str | None) -> str:
         return "NearShare"
 
 
+def _validate_files(files: list[Path]) -> bool:
+    """Check all files exist and are not directories. Prints errors."""
+    ok = True
+    for f in files:
+        if not f.exists():
+            print(f"Error: File not found: {f}", file=sys.stderr)
+            ok = False
+        elif f.is_dir():
+            print(f"Error: Directories not supported: {f}", file=sys.stderr)
+            ok = False
+    return ok
+
+
+async def cmd_init(args: argparse.Namespace) -> int:
+    """Execute the 'init' subcommand (hotspot + send)."""
+    if not _validate_files(args.files):
+        return 1
+
+    from desktop.commands.init_cmd import run_init
+    return await run_init(
+        files=args.files,
+        device_id=_get_device_id(),
+        display_name=_get_display_name(args.name),
+        port=args.port,
+    )
+
+
 async def cmd_send(args: argparse.Namespace) -> int:
-    """Execute the 'send' subcommand."""
+    """Execute the 'send' subcommand (direct mode)."""
     from desktop.adapters.tcp_transport import TcpTransport
     from engine.transfer.sender import TransferSender
 
+    if not _validate_files(args.files):
+        return 1
+
     device_id = _get_device_id()
     display_name = _get_display_name(args.name)
-
-    # validate files exist
-    for f in args.files:
-        if not f.exists():
-            print(f"Error: File not found: {f}", file=sys.stderr)
-            return 1
-        if f.is_dir():
-            print(f"Error: Directories not supported: {f}", file=sys.stderr)
-            return 1
 
     print(f"Connecting to {args.host}:{args.port}...")
     transport = TcpTransport()
@@ -154,14 +211,32 @@ async def cmd_send(args: argparse.Namespace) -> int:
 
 
 async def cmd_receive(args: argparse.Namespace) -> int:
-    """Execute the 'receive' subcommand."""
-    from desktop.adapters.tcp_transport import TcpTransport
-    from engine.transfer.receiver import TransferReceiver
+    """Execute the 'receive' subcommand.
 
+    Two modes:
+      --listen: wait for direct incoming connections (original behaviour)
+      default:  scan for NearShare hotspots and auto-connect
+    """
     device_id = _get_device_id()
     display_name = _get_display_name(args.name)
     save_dir = args.save_dir.resolve()
     save_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.listen:
+        return await _receive_listen(args, device_id, display_name, save_dir)
+    else:
+        return await _receive_auto(args, device_id, display_name, save_dir)
+
+
+async def _receive_listen(
+    args: argparse.Namespace,
+    device_id: DeviceId,
+    display_name: str,
+    save_dir: Path,
+) -> int:
+    """Listen mode: wait for direct TCP connections."""
+    from desktop.adapters.tcp_transport import TcpTransport
+    from engine.transfer.receiver import TransferReceiver
 
     transport = TcpTransport(listen_port=args.port)
     try:
@@ -198,6 +273,25 @@ async def cmd_receive(args: argparse.Namespace) -> int:
         return 1
 
 
+async def _receive_auto(
+    args: argparse.Namespace,
+    device_id: DeviceId,
+    display_name: str,
+    save_dir: Path,
+) -> int:
+    """Auto mode: scan for NearShare hotspots and connect."""
+    from desktop.commands.receive_cmd import run_receive_auto
+
+    return await run_receive_auto(
+        device_id=device_id,
+        display_name=display_name,
+        save_dir=save_dir,
+        auto_accept=args.auto_accept,
+        port=args.port,
+        scan_timeout=args.scan_timeout,
+    )
+
+
 def main() -> None:
     """CLI entry point."""
     parser = build_parser()
@@ -206,7 +300,9 @@ def main() -> None:
     level = logging.DEBUG if args.verbose else logging.INFO
     setup_engine_logging(level=level)
 
-    if args.command == "send":
+    if args.command == "init":
+        exit_code = asyncio.run(cmd_init(args))
+    elif args.command == "send":
         exit_code = asyncio.run(cmd_send(args))
     elif args.command == "receive":
         exit_code = asyncio.run(cmd_receive(args))

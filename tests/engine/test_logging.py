@@ -86,7 +86,8 @@ class TestSetupEngineLogging:
 
     def test_has_session_filter(self) -> None:
         logger = setup_engine_logging()
-        assert any(isinstance(f, SessionFilter) for f in logger.filters)
+        handler = logger.handlers[0]
+        assert any(isinstance(f, SessionFilter) for f in handler.filters)
 
     def test_idempotent_handlers(self) -> None:
         setup_engine_logging()
