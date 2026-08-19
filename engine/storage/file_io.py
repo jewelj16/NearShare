@@ -58,14 +58,21 @@ def file_metadata_from_path(
     )
 
 
-def read_file_bytes(path: Path) -> bytes:
-    """Read an entire file into memory.
+import mmap
+from contextlib import contextmanager
+from collections.abc import Generator
+
+@contextmanager
+def mmap_file(path: Path) -> Generator[mmap.mmap | bytes, None, None]:
+    """Map an entire file into memory using mmap.
+
+    For empty files, yields an empty bytes object since mmap cannot map 0 bytes.
 
     Args:
         path: Path to the file.
 
-    Returns:
-        The raw file bytes.
+    Yields:
+        An mmap object (or empty bytes) that supports slicing like bytes.
 
     Raises:
         FileNotFoundError: If the path does not exist.
@@ -77,8 +84,15 @@ def read_file_bytes(path: Path) -> bytes:
         raise FileNotFoundError(f"No such file: {path}")
     if path.is_dir():
         raise IsADirectoryError(f"Path is a directory: {path}")
-    return path.read_bytes()
-
+        
+    size = path.stat().st_size
+    if size == 0:
+        yield b""
+        return
+        
+    with path.open("rb") as f:
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            yield mm
 
 # ── writing ───────────────────────────────────────────────────────────────────
 

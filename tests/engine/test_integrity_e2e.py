@@ -76,14 +76,14 @@ class TestVerifyFileIntegrity:
 class TestFullSessionIntegrity:
     """Simulate a complete transfer session with hash verification."""
 
-    def test_chunk_reassemble_verify(self) -> None:
+    async def test_chunk_reassemble_verify(self) -> None:
         """Split, reassemble in order, and verify whole-file hash."""
         data = _make_file_data(DEFAULT_CHUNK_SIZE * 4)
         meta = _metadata_for(data)
         tid = "test-session-1"
 
         # split into chunks
-        chunks = list(split(data, meta, tid))
+        chunks = [c async for c in split(data, meta, tid)]
         assert len(chunks) == 4
 
         # verify each chunk hash
@@ -97,20 +97,20 @@ class TestFullSessionIntegrity:
         # whole-file verify
         assert verify_file_integrity(reassembled, meta) is True
 
-    def test_incremental_hasher_matches(self) -> None:
+    async def test_incremental_hasher_matches(self) -> None:
         """Incremental hasher should produce the same result as full hash."""
         data = _make_file_data(DEFAULT_CHUNK_SIZE * 3)
         meta = _metadata_for(data)
 
         hasher = create_file_hasher()
-        chunks = list(split(data, meta, "sess"))
+        chunks = [c async for c in split(data, meta, "sess")]
         for c in chunks:
             hasher.update(c.data)
 
         assert hasher.hexdigest() == meta.sha256
         assert hasher.verify(meta.sha256)
 
-    def test_out_of_order_incremental_differs(self) -> None:
+    async def test_out_of_order_incremental_differs(self) -> None:
         """Feeding chunks out of order produces a different hash."""
         # Use distinct per-chunk content so reversal is detectable.
         chunk_a = b"A" * DEFAULT_CHUNK_SIZE
@@ -119,7 +119,7 @@ class TestFullSessionIntegrity:
         data = chunk_a + chunk_b + chunk_c
         meta = _metadata_for(data)
 
-        chunks = list(split(data, meta, "sess"))
+        chunks = [c async for c in split(data, meta, "sess")]
         hasher = create_file_hasher()
         # feed in reverse order (C, B, A instead of A, B, C)
         for c in reversed(chunks):

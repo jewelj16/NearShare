@@ -34,14 +34,9 @@ def _synthetic_data_generator(size: int, chunk_size: int):
 class TestLargeFileStreaming:
     """Verify that chunking and reassembly are memory-efficient."""
 
-    def test_chunker_streams_without_buffering(self) -> None:
-        """split() yields chunks lazily — we can process a 100 MB file
+    async def test_chunker_streams_without_buffering(self) -> None:
+        """split() yields chunks lazily — we can process a 10 MB file
         without the full data in memory at peak time."""
-        # Build data in one go for split() (it needs bytes),
-        # but measure peak memory during chunk iteration.
-        # For the streaming assertion we check that the peak delta
-        # is well below the file size.
-
         # Use a smaller file for CI speed (10 MB) but same logic
         file_size = 10 * 1024 * 1024
         data = bytes(i % 256 for i in range(file_size))
@@ -56,7 +51,7 @@ class TestLargeFileStreaming:
         snapshot_before = tracemalloc.take_snapshot()
 
         chunk_count = 0
-        for chunk in split(data, meta, "sess-large"):
+        async for chunk in split(data, meta, "sess-large"):
             # verify each chunk hash
             assert chunk_hash(chunk.data) == chunk.sha256
             chunk_count += 1
@@ -66,19 +61,14 @@ class TestLargeFileStreaming:
 
         assert chunk_count == meta.chunk_count
 
-        # Peak memory increase should be well below file size.
-        # The generator yields one chunk at a time, so delta should
-        # be roughly chunk_size, not file_size.
         stats = snapshot_after.compare_to(snapshot_before, "lineno")
         peak_delta = sum(s.size_diff for s in stats if s.size_diff > 0)
-        # Allow generous 5 MB headroom (the data var itself is 10 MB,
-        # but the chunker should not allocate another copy).
         assert peak_delta < file_size, (
             f"Peak memory delta {peak_delta} >= file size {file_size}: "
             "chunker may be buffering the whole file"
         )
 
-    def test_reassembler_accepts_out_of_order(self) -> None:
+    async def test_reassembler_accepts_out_of_order(self) -> None:
         """ChunkAssembler handles out-of-order delivery for a large file."""
         file_size = 5 * 1024 * 1024  # 5 MB
         data = bytes(i % 256 for i in range(file_size))
@@ -89,18 +79,18 @@ class TestLargeFileStreaming:
             sha256=hashlib.sha256(data).hexdigest(),
         )
 
-        chunks = list(split(data, meta, "sess"))
+        chunks = [c async for c in split(data, meta, "sess")]
 
         assembler = ChunkAssembler(meta)
 
         # deliver in reverse order
         for chunk in reversed(chunks):
-            assembler.write_chunk(chunk)
+            await assembler.write_chunk(chunk)
 
         assert assembler.is_complete
         assert assembler.to_bytes() == data
 
-    def test_reassembler_rejects_corrupt_chunk(self) -> None:
+    async def test_reassembler_rejects_corrupt_chunk(self) -> None:
         """ChunkAssembler rejects a chunk with a bad hash."""
         file_size = _TEST_CHUNK_SIZE * 3
         data = bytes(i % 256 for i in range(file_size))
@@ -110,7 +100,7 @@ class TestLargeFileStreaming:
             chunk_size=_TEST_CHUNK_SIZE,
         )
 
-        chunks = list(split(data, meta, "sess"))
+        chunks = [c async for c in split(data, meta, "sess")]
         bad_chunk = Chunk(
             transfer_id="sess",
             file_index=0,
@@ -120,11 +110,11 @@ class TestLargeFileStreaming:
         )
 
         assembler = ChunkAssembler(meta)
-        assembler.write_chunk(chunks[0])
+        await assembler.write_chunk(chunks[0])
         with pytest.raises(ValueError, match="hash mismatch"):
-            assembler.write_chunk(bad_chunk)
+            await assembler.write_chunk(bad_chunk)
 
-    def test_progress_tracking(self) -> None:
+    async def test_progress_tracking(self) -> None:
         """Progress reports accurately for large files."""
         file_size = _TEST_CHUNK_SIZE * 10
         data = bytes(i % 256 for i in range(file_size))
@@ -134,10 +124,10 @@ class TestLargeFileStreaming:
             chunk_size=_TEST_CHUNK_SIZE,
         )
 
-        chunks = list(split(data, meta, "sess"))
+        chunks = [c async for c in split(data, meta, "sess")]
         assembler = ChunkAssembler(meta)
 
         for i, chunk in enumerate(chunks):
-            assembler.write_chunk(chunk)
+            await assembler.write_chunk(chunk)
             expected_progress = (i + 1) / len(chunks)
             assert assembler.progress == pytest.approx(expected_progress)

@@ -12,25 +12,27 @@ writes into a pre-allocated buffer.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator
 
 from engine.types import Chunk, FileMetadata
 
 
-def split(
-    data: bytes,
+import asyncio
+import mmap
+
+async def split(
+    data: bytes | memoryview | mmap.mmap,
     metadata: FileMetadata,
     transfer_id: str,
     file_index: int = 0,
-) -> Generator[Chunk, None, None]:
+) -> AsyncGenerator[Chunk, None]:
     """Split file data into Chunk objects according to metadata.chunk_size.
 
-    Yields one Chunk per slice, computing the per-chunk SHA-256 on the fly.
-    The last chunk may be smaller than chunk_size if the file size is not
-    an exact multiple.
+    Yields one Chunk per slice, computing the per-chunk SHA-256 on the fly
+    using a thread pool to avoid blocking the event loop.
 
     Args:
-        data:        The complete file contents as bytes.
+        data:        The complete file contents (bytes, memoryview, or mmap).
         metadata:    FileMetadata describing the file (uses chunk_size).
         transfer_id: Session ID to stamp on every chunk.
         file_index:  Zero-based index of this file in the transfer.
@@ -41,22 +43,28 @@ def split(
     chunk_size = metadata.chunk_size
     offset = 0
     seq = 0
+    loop = asyncio.get_running_loop()
 
     while offset < len(data):
         end = min(offset + chunk_size, len(data))
         piece = data[offset:end]
-        sha = hashlib.sha256(piece).hexdigest()
+        
+        # Offload hashing to thread pool
+        sha = await loop.run_in_executor(
+            None, lambda p=piece: hashlib.sha256(p).hexdigest()
+        )
 
         yield Chunk(
             transfer_id=transfer_id,
             file_index=file_index,
             seq=seq,
-            data=piece,
+            data=bytes(piece) if not isinstance(piece, bytes) else piece,
             sha256=sha,
         )
 
         offset = end
         seq += 1
+
 
 
 class ChunkAssembler:
@@ -77,7 +85,7 @@ class ChunkAssembler:
         self.buffer = bytearray(metadata.size)
         self.received: set[int] = set()
 
-    def write_chunk(self, chunk: Chunk) -> None:
+    async def write_chunk(self, chunk: Chunk) -> None:
         """Write a chunk's data at the correct byte offset.
 
         Validates the chunk's SHA-256 hash before writing.  Duplicate
@@ -99,8 +107,12 @@ class ChunkAssembler:
                 f"[0, {self.metadata.chunk_count})"
             )
 
-        # verify per-chunk hash
-        actual_sha = hashlib.sha256(chunk.data).hexdigest()
+        # verify per-chunk hash in thread pool
+        loop = asyncio.get_running_loop()
+        actual_sha = await loop.run_in_executor(
+            None, lambda c=chunk.data: hashlib.sha256(c).hexdigest()
+        )
+        
         if actual_sha != chunk.sha256:
             raise ValueError(
                 f"Chunk {chunk.seq} hash mismatch: "
