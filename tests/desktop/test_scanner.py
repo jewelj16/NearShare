@@ -86,7 +86,7 @@ class TestConnectToHotspot:
     @patch("desktop.network.scanner.subprocess.run")
     def test_connect_success(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock()
-        assert connect_to_hotspot("NearShare-7f3a") is True
+        assert connect_to_hotspot("NearShare-7f3a", "pass") is True
         args = mock_run.call_args[0][0]
         assert "connect" in args
         assert "NearShare-7f3a" in args
@@ -94,11 +94,11 @@ class TestConnectToHotspot:
     @patch("desktop.network.scanner.subprocess.run",
            side_effect=subprocess.CalledProcessError(1, "nmcli", stderr="timeout"))
     def test_connect_failure(self, _: MagicMock) -> None:
-        assert connect_to_hotspot("NearShare-7f3a") is False
+        assert connect_to_hotspot("NearShare-7f3a", "pass") is False
 
     @patch("desktop.network.scanner.subprocess.run", side_effect=FileNotFoundError)
     def test_connect_no_nmcli(self, _: MagicMock) -> None:
-        assert connect_to_hotspot("NearShare-7f3a") is False
+        assert connect_to_hotspot("NearShare-7f3a", "pass") is False
 
 
 class TestDisconnectFromHotspot:

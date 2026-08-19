@@ -11,7 +11,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 
-from desktop.network.hotspot import HOTSPOT_PASSWORD, HOTSPOT_SSID_PREFIX
+from desktop.network.hotspot import HOTSPOT_SSID_PREFIX
 
 logger = logging.getLogger("nearshare.engine.network")
 
@@ -101,7 +101,7 @@ def find_nearshare_hotspots(networks: list[ScannedNetwork] | None = None) -> lis
     return [n for n in networks if n.ssid.startswith(HOTSPOT_SSID_PREFIX)]
 
 
-def connect_to_hotspot(ssid: str, password: str = HOTSPOT_PASSWORD) -> bool:
+def connect_to_hotspot(ssid: str, password: str) -> bool:
     """Connect to a NearShare hotspot using nmcli.
 
     Args:
@@ -149,37 +149,3 @@ def disconnect_from_hotspot(ssid: str) -> None:
     logger.info("Disconnected from '%s'", ssid)
 
 
-def scan_and_connect(timeout_s: float = 30.0) -> str | None:
-    """Scan for NearShare hotspots and connect to the strongest one.
-
-    Keeps scanning until a hotspot is found or timeout is reached.
-
-    Args:
-        timeout_s: Maximum time to spend scanning.
-
-    Returns:
-        The SSID we connected to, or None if nothing was found.
-    """
-    deadline = time.monotonic() + timeout_s
-    attempt = 0
-
-    while time.monotonic() < deadline:
-        attempt += 1
-        logger.info("Scanning for NearShare hotspots (attempt %d)...", attempt)
-
-        hotspots = find_nearshare_hotspots()
-        if hotspots:
-            best = hotspots[0]
-            logger.info("Found '%s' (signal %d%%)", best.ssid, best.signal)
-            if connect_to_hotspot(best.ssid):
-                return best.ssid
-
-        # wait before next scan
-        remaining = deadline - time.monotonic()
-        if remaining > 3.0:
-            time.sleep(3.0)
-        else:
-            break
-
-    logger.warning("No NearShare hotspots found within %.0fs", timeout_s)
-    return None

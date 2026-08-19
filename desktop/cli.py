@@ -24,6 +24,18 @@ from engine.types import DEFAULT_PORT, DeviceId
 logger = logging.getLogger("nearshare.cli")
 
 
+def _get_default_save_dir() -> Path:
+    """Return the default save directory, resolving SUDO_USER if running as root."""
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        import pwd
+        try:
+            return Path(pwd.getpwnam(sudo_user).pw_dir) / "Downloads" / "NearShare"
+        except KeyError:
+            pass
+    return Path.home() / "Downloads" / "NearShare"
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the NearShare CLI."""
     parser = argparse.ArgumentParser(
@@ -43,12 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         "init",
         help="Create a hotspot and send files (auto-discovery mode)",
     )
-    init_p.add_argument(
-        "files",
-        nargs="+",
-        type=Path,
-        help="Files to send",
-    )
+
     init_p.add_argument(
         "--port",
         type=int,
@@ -91,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     recv_p.add_argument(
         "--save-dir",
         type=Path,
-        default=Path.home() / "Downloads" / "NearShare",
+        default=_get_default_save_dir(),
         help="Directory to save received files (default ~/Downloads/NearShare)",
     )
     recv_p.add_argument(
@@ -163,12 +170,8 @@ def _validate_files(files: list[Path]) -> bool:
 
 async def cmd_init(args: argparse.Namespace) -> int:
     """Execute the 'init' subcommand (hotspot + send)."""
-    if not _validate_files(args.files):
-        return 1
-
     from desktop.commands.init_cmd import run_init
     return await run_init(
-        files=args.files,
         device_id=_get_device_id(),
         display_name=_get_display_name(args.name),
         port=args.port,

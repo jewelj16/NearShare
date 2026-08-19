@@ -96,3 +96,13 @@ class TransferSession:
         expected = set(range(self.files[file_index].chunk_count))
         acked = self.ack_bitmaps.get(file_index, set())
         return expected - acked
+
+    def get_file_bytes_acked(self, file_index: int, chunk_size: int = 262144) -> int:
+        """Calculate the total bytes acked for this file so far."""
+        if file_index < 0 or file_index >= len(self.files):
+            return 0
+        meta = self.files[file_index]
+        acked_chunks = len(self.ack_bitmaps.get(file_index, set()))
+        if acked_chunks == meta.chunk_count:
+            return meta.size
+        return acked_chunks * chunk_size

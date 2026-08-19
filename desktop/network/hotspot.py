@@ -50,13 +50,16 @@ class HotspotInfo:
     connection_name: str
 
 
-def generate_hotspot_ssid() -> str:
-    """Generate a random NearShare hotspot SSID like 'NearShare-7f3a'."""
-    suffix = secrets.token_hex(2)  # 4 hex chars
-    return f"{HOTSPOT_SSID_PREFIX}{suffix}"
+def generate_hotspot_password() -> str:
+    """Generate a random 8-digit numeric password."""
+    return "".join(secrets.choice(string.digits) for _ in range(8))
 
 
-def create_hotspot(interface: str | None = None) -> HotspotInfo:
+def create_hotspot(
+    interface: str | None = None,
+    ssid_suffix: str | None = None,
+    password: str | None = None,
+) -> HotspotInfo:
     """Create and activate a Wi-Fi hotspot using nmcli.
 
     This requires root privileges (sudo). NetworkManager automatically
@@ -64,6 +67,8 @@ def create_hotspot(interface: str | None = None) -> HotspotInfo:
 
     Args:
         interface: Wireless interface to use. Auto-detected if None.
+        ssid_suffix: Optional short suffix for the SSID (e.g. 'Bob').
+        password: WPA2 password. Auto-generated if None.
 
     Returns:
         HotspotInfo with the details of the running hotspot.
@@ -79,8 +84,14 @@ def create_hotspot(interface: str | None = None) -> HotspotInfo:
             "Check that your wireless adapter is enabled."
         )
 
-    ssid = generate_hotspot_ssid()
+    if ssid_suffix:
+        ssid = f"{HOTSPOT_SSID_PREFIX}{ssid_suffix[:6]}"
+    else:
+        ssid = f"{HOTSPOT_SSID_PREFIX}{secrets.token_hex(2)}"
+
     conn_name = ssid  # use SSID as the connection profile name
+    if password is None:
+        password = generate_hotspot_password()
 
     try:
         subprocess.run(
@@ -88,7 +99,7 @@ def create_hotspot(interface: str | None = None) -> HotspotInfo:
                 "nmcli", "device", "wifi", "hotspot",
                 "ifname", interface,
                 "ssid", ssid,
-                "password", HOTSPOT_PASSWORD,
+                "password", password,
                 "con-name", conn_name,
             ],
             capture_output=True, text=True, check=True,
@@ -106,7 +117,7 @@ def create_hotspot(interface: str | None = None) -> HotspotInfo:
 
     return HotspotInfo(
         ssid=ssid,
-        password=HOTSPOT_PASSWORD,
+        password=password,
         interface=interface,
         gateway_ip=HOTSPOT_GATEWAY_IP,
         connection_name=conn_name,

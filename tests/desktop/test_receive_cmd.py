@@ -18,9 +18,10 @@ class TestRunReceiveAuto:
 
     @pytest.mark.asyncio
     async def test_returns_error_when_no_hotspot_found(self, tmp_path: Path) -> None:
-        """If scan_and_connect returns None, should return 1."""
+        """If find_nearshare_hotspots returns [], should return 1."""
         with patch("desktop.commands.receive_cmd.take_wifi_snapshot", return_value=None), \
-             patch("desktop.commands.receive_cmd.scan_and_connect", return_value=None):
+             patch("desktop.commands.receive_cmd.find_nearshare_hotspots", return_value=[]), \
+             patch("builtins.input", return_value=""):
 
             result = await run_receive_auto(
                 device_id=DEVICE_ID,
@@ -35,12 +36,16 @@ class TestRunReceiveAuto:
         """If TCP connect to gateway fails, should return 1."""
         mock_transport = MagicMock()
         mock_transport.connect = AsyncMock(side_effect=OSError("Connection refused"))
+        
+        mock_hotspot = MagicMock(ssid="NearShare-abcd")
 
         with patch("desktop.commands.receive_cmd.take_wifi_snapshot", return_value=None), \
-             patch("desktop.commands.receive_cmd.scan_and_connect", return_value="NearShare-abcd"), \
+             patch("desktop.commands.receive_cmd.find_nearshare_hotspots", return_value=[mock_hotspot]), \
+             patch("desktop.commands.receive_cmd.connect_to_hotspot", return_value=True), \
              patch("desktop.commands.receive_cmd.disconnect_from_hotspot"), \
              patch("desktop.commands.receive_cmd.TcpTransport", return_value=mock_transport), \
-             patch("desktop.commands.receive_cmd.asyncio.sleep", new_callable=AsyncMock):
+             patch("desktop.commands.receive_cmd.asyncio.sleep", new_callable=AsyncMock), \
+             patch("builtins.input", side_effect=["", "1", "pass"]):
 
             result = await run_receive_auto(
                 device_id=DEVICE_ID,
@@ -60,12 +65,16 @@ class TestRunReceiveAuto:
         mock_receiver = MagicMock()
         mock_receiver.run = AsyncMock(return_value=mock_result)
 
+        mock_hotspot = MagicMock(ssid="NearShare-abcd")
+
         with patch("desktop.commands.receive_cmd.take_wifi_snapshot", return_value=None), \
-             patch("desktop.commands.receive_cmd.scan_and_connect", return_value="NearShare-abcd"), \
+             patch("desktop.commands.receive_cmd.find_nearshare_hotspots", return_value=[mock_hotspot]), \
+             patch("desktop.commands.receive_cmd.connect_to_hotspot", return_value=True), \
              patch("desktop.commands.receive_cmd.disconnect_from_hotspot") as mock_disconnect, \
              patch("desktop.commands.receive_cmd.TcpTransport", return_value=mock_transport), \
              patch("desktop.commands.receive_cmd.TransferReceiver", return_value=mock_receiver), \
-             patch("desktop.commands.receive_cmd.asyncio.sleep", new_callable=AsyncMock):
+             patch("desktop.commands.receive_cmd.asyncio.sleep", new_callable=AsyncMock), \
+             patch("builtins.input", side_effect=["", "1", "pass"]):
 
             result = await run_receive_auto(
                 device_id=DEVICE_ID,
