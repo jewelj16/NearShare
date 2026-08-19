@@ -10,3 +10,4 @@
 #   ack_msg.py        — ACK (0x07)
 #   cancel.py         — CANCEL (0x08)
 #   complete.py       — TRANSFER_COMPLETE (0x09)
+#   join_session.py   — JOIN_SESSION (0x0B)

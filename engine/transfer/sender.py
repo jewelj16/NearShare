@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from typing import Callable, Awaitable
 
 from engine.logging_.setup import get_logger, set_session_id
 from engine.protocol.chunk_msg import build_chunk_payload
@@ -25,10 +26,11 @@ from engine.protocol.complete import build_transfer_complete_payload
 from engine.protocol.handshake import perform_handshake, HandshakeError
 from engine.protocol.metadata import send_metadata, wait_for_accept_or_reject
 from engine.protocol.transfer_start import build_transfer_start_payload
+from engine.protocol.join_session import build_join_session_payload
 from engine.transfer.ack import parse_ack_payload
-from engine.storage.file_io import file_metadata_from_path, read_file_bytes
+from engine.storage.file_io import file_metadata_from_path, mmap_file
 from engine.transfer.result import TransferResult
-from engine.transfer.session import TransferSession
+from engine.transfer.session import TransferSession, ConnectionPool
 from engine.transfer.state_machine import TransferStateMachine
 from engine.transfer.window import SendWindow
 from engine.types import (
@@ -51,8 +53,8 @@ class TransferSender:
     Args:
         local_device_id:    Our DeviceId (announced in HELLO).
         local_display_name: Our display name.
-        chunk_size:         Chunk size in bytes (default 256 KB).
-        window_capacity:    Sliding window size (default 32).
+        chunk_size:         Chunk size in bytes (default 1 MB).
+        window_capacity:    Sliding window size (default 128).
     """
 
     def __init__(
@@ -66,32 +68,80 @@ class TransferSender:
         self._display_name = local_display_name
         self._chunk_size = chunk_size
         self._window_capacity = window_capacity
+        self._pool = ConnectionPool(4)
+        self._frame_queue: asyncio.Queue[tuple[object, object]] = asyncio.Queue()
+        self._readers: list[asyncio.Task] = []
+
+    async def _read_worker(self, conn: object) -> None:
+        """Continuously reads frames from a connection and puts them in a central queue."""
+        try:
+            while True:
+                frame = await conn.recv_frame()  # type: ignore[attr-defined]
+                await self._frame_queue.put((conn, frame))
+                if frame.msg_type in (MessageType.TRANSFER_COMPLETE, MessageType.CANCEL, MessageType.ERROR):
+                    break
+        except Exception as e:
+            await self._frame_queue.put((conn, e))
+
+    async def _accept_loop(self, conn_acceptor: Callable[[], Awaitable[object]], expected_session_id: str) -> None:
+        """Accept secondary connections and map them via JOIN_SESSION."""
+        try:
+            while True:
+                new_conn = await conn_acceptor()
+                logger.info("Accepted new connection, waiting for JOIN_SESSION...")
+                asyncio.create_task(self._handle_secondary_conn(new_conn, expected_session_id))
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning("Error in accept loop: %s", e)
+
+    async def _handle_secondary_conn(self, conn: object, expected_session_id: str) -> None:
+        try:
+            frame = await conn.recv_frame()  # type: ignore[attr-defined]
+            if frame.msg_type is MessageType.JOIN_SESSION:
+                session_id = parse_join_session_payload(frame.payload)
+                if session_id == expected_session_id:
+                    logger.info("Secondary connection mapped to session %s", session_id)
+                    self._pool.add(conn)
+                    task = asyncio.create_task(self._read_worker(conn))
+                    self._readers.append(task)
+                else:
+                    logger.warning("Rejected JOIN_SESSION for unknown session: %s", session_id)
+            else:
+                logger.warning("Expected JOIN_SESSION, got %s", frame.msg_type.name)
+        except Exception as e:
+            logger.warning("Error handling secondary connection: %s", e)
 
     async def run(
         self,
         conn: object,
         files: list[Path],
+        conn_factory: Callable[[], Awaitable[object]] | None = None,
+        conn_acceptor: Callable[[], Awaitable[object]] | None = None,
     ) -> TransferResult:
         """Execute the full sender flow on an open connection.
 
         Args:
             conn:  A Connection-like object with send_frame/recv_frame/close.
             files: Paths to the files to send (must all exist).
+            conn_factory: Optional async factory to create new secondary sockets (if we are TCP client).
+            conn_acceptor: Optional async factory to accept new secondary sockets (if we are TCP server).
 
         Returns:
             A TransferResult describing the outcome.
         """
         start = time.monotonic()
         metadatas: list[FileMetadata] = []
-        file_data: list[bytes] = []
+        accept_task = None
 
-        # read files up front (v1 keeps everything in memory)
+        # We assume the caller gave us one valid connection
+        self._pool.add(conn)
+
+        # read metadata up front
         try:
             for p in files:
                 meta = file_metadata_from_path(p, self._chunk_size)
-                data = read_file_bytes(p)
                 metadatas.append(meta)
-                file_data.append(data)
         except OSError as exc:
             return TransferResult.failure(
                 session_id="<pre-session>",
@@ -141,16 +191,43 @@ class TransferSender:
             )
             logger.info("Sending %d file(s)", len(metadatas))
 
+            # ── initiate secondary connections ────────────────────────────
+            if conn_factory:
+                for _ in range(3):
+                    try:
+                        c = await conn_factory()
+                        await c.send_frame(  # type: ignore[attr-defined]
+                            MessageType.JOIN_SESSION,
+                            build_join_session_payload(session.session_id)
+                        )
+                        self._pool.add(c)
+                        logger.info("Initiated secondary connection")
+                    except Exception as e:
+                        logger.warning("Failed to open secondary connection: %s", e)
+                        break
+            elif conn_acceptor:
+                accept_task = asyncio.create_task(self._accept_loop(conn_acceptor, session.session_id))
+
+            # ── start reader tasks ────────────────────────────────────────
+            for c in self._pool._conns._queue:
+                t = asyncio.create_task(self._read_worker(c))
+                self._readers.append(t)
+
             # ── chunk loop ────────────────────────────────────────────────
             bytes_sent = await self._send_all_files(
-                conn, session, metadatas, file_data
+                session, metadatas, files
             )
 
             # ── TRANSFER_COMPLETE ─────────────────────────────────────────
-            await conn.send_frame(  # type: ignore[attr-defined]
-                MessageType.TRANSFER_COMPLETE,
-                build_transfer_complete_payload(session.session_id),
-            )
+            c = await self._pool.get()
+            try:
+                await c.send_frame(  # type: ignore[attr-defined]
+                    MessageType.TRANSFER_COMPLETE,
+                    build_transfer_complete_payload(session.session_id),
+                )
+            finally:
+                self._pool.return_conn(c)
+
             sm.transition(TransferState.COMPLETE)
             duration = time.monotonic() - start
             logger.info("Transfer complete in %.2fs, %d bytes", duration, bytes_sent)
@@ -179,76 +256,76 @@ class TransferSender:
             )
         finally:
             set_session_id(None)
+            for t in self._readers:
+                t.cancel()
+            if accept_task:
+                accept_task.cancel()
 
     # ── internal ──────────────────────────────────────────────────────────────
 
     async def _send_all_files(
         self,
-        conn: object,
         session: TransferSession,
         metadatas: list[FileMetadata],
-        file_data: list[bytes],
+        file_paths: list[Path],
     ) -> int:
-        """Send all files one at a time, each with its own sliding window.
+        """Send all files one at a time, distributing chunks across the connection pool.
 
-        Sends files sequentially.  For each file, two concurrent tasks run:
-          - chunk sender: splits the file and sends chunks through the window
-          - ack receiver: reads ACK frames, updates session bitmap, frees slots
-
-        The window is per-file because chunk seq numbers restart at 0 for
-        each file (per protocol.md §3.6).
+        Sends files sequentially. For each file, we split it into chunks, wait for
+        space in the SendWindow, pop a connection from the pool, send the chunk,
+        and return the connection. A central ACK reader loop processes ACKs from all
+        sockets.
         """
         session.init_ack_bitmaps()
         bytes_sent = 0
 
-        for fi, (meta, data) in enumerate(zip(metadatas, file_data)):
-            logger.debug("Sending file %d: %s (%d bytes)", fi, meta.name, meta.size)
-            window = SendWindow(self._window_capacity)
-            file_done = asyncio.Event()
+        windows = {i: SendWindow(self._window_capacity) for i in range(len(metadatas))}
+        file_events = {i: asyncio.Event() for i in range(len(metadatas))}
 
-            async def _send_file_chunks(
-                _fi: int = fi,
-                _meta: FileMetadata = meta,
-                _data: bytes = data,
-            ) -> None:
-                for chunk in split(_data, _meta, session.session_id, _fi):
-                    await window.wait_for_space()
-                    await conn.send_frame(  # type: ignore[attr-defined]
-                        MessageType.CHUNK, build_chunk_payload(chunk)
-                    )
-                    window.mark_sent(chunk.seq)
-                file_done.set()
+        async def _recv_acks() -> None:
+            while not session.is_transfer_complete():
+                conn, frame = await self._frame_queue.get()
+                if isinstance(frame, Exception):
+                    continue
+                if frame.msg_type is MessageType.ACK:
+                    _, ack_fi, seqs = parse_ack_payload(frame.payload)
+                    for seq in seqs:
+                        await session.ack_chunk_safe(ack_fi, seq)
+                        windows[ack_fi].ack(seq)
+                    if session.is_file_complete(ack_fi):
+                        file_events[ack_fi].set()
+                elif frame.msg_type is MessageType.CANCEL:
+                    # abort
+                    break
 
-            async def _recv_file_acks(_fi: int = fi) -> None:
-                """Read ACKs until this file is fully acknowledged."""
-                while not session.is_file_complete(_fi):
-                    try:
-                        frame = await asyncio.wait_for(
-                            conn.recv_frame(),  # type: ignore[attr-defined]
-                            timeout=30.0,
-                        )
-                    except (asyncio.TimeoutError, TimeoutError):
-                        if file_done.is_set():
-                            break
-                        continue
-                    except OSError:
-                        break
-                    if frame.msg_type is MessageType.ACK:
-                        _, ack_fi, seqs = parse_ack_payload(frame.payload)
-                        if ack_fi == _fi:
-                            for seq in seqs:
-                                await session.ack_chunk_safe(_fi, seq)
-                                window.ack(seq)
+        ack_task = asyncio.create_task(_recv_acks())
 
-            send_task = asyncio.create_task(_send_file_chunks())
-            ack_task = asyncio.create_task(_recv_file_acks())
-            try:
-                await asyncio.gather(send_task, ack_task)
-            except Exception:
-                send_task.cancel()
-                ack_task.cancel()
-                raise
+        try:
+            for fi, (meta, path) in enumerate(zip(metadatas, file_paths)):
+                logger.debug("Sending file %d: %s (%d bytes)", fi, meta.name, meta.size)
+                window = windows[fi]
 
-            bytes_sent += meta.size
+                if meta.size == 0:
+                    file_events[fi].set()
+                else:
+                    with mmap_file(path) as mm:
+                        async for chunk in split(mm, meta, session.session_id, fi):
+                            await window.wait_for_space()
+                            c = await self._pool.get()
+                            try:
+                                await c.send_frame(  # type: ignore[attr-defined]
+                                    MessageType.CHUNK, build_chunk_payload(chunk)
+                                )
+                            except Exception as e:
+                                logger.debug("Failed to send chunk: %s", e)
+                            finally:
+                                self._pool.return_conn(c)
+                            window.mark_sent(chunk.seq)
+
+                # wait for this file to be completely acked
+                await file_events[fi].wait()
+                bytes_sent += meta.size
+        finally:
+            ack_task.cancel()
 
         return bytes_sent

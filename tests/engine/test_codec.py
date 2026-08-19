@@ -184,6 +184,7 @@ class TestMessageType:
     EXPECTED = {
         "HELLO", "METADATA", "ACCEPT", "REJECT", "TRANSFER_START",
         "CHUNK", "ACK", "CANCEL", "TRANSFER_COMPLETE", "ERROR",
+        "JOIN_SESSION",
     }
 
     def test_all_members_present(self) -> None:
@@ -191,11 +192,11 @@ class TestMessageType:
         assert actual == self.EXPECTED
 
     def test_member_count(self) -> None:
-        assert len(MessageType) == 10
+        assert len(MessageType) == 11
 
     def test_codes_are_sequential(self) -> None:
         codes = [m.value for m in MessageType]
-        assert codes == list(range(0x01, 0x0B))
+        assert codes == list(range(0x01, 0x0C))
 
 
 # Frame dataclass

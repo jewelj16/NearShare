@@ -103,8 +103,11 @@ async def run_init(
             local_display_name=display_name,
         )
 
+        async def _acceptor() -> object:
+            return await transport.accept()
+
         print(f"Sending {len(files)} file(s)...")
-        result = await sender.run(conn, files)
+        result = await sender.run(conn, files, conn_acceptor=_acceptor)
         await transport.close()
 
         if result.ok:

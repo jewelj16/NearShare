@@ -37,6 +37,7 @@ class MessageType(enum.IntEnum):
     CANCEL            = 0x08
     TRANSFER_COMPLETE = 0x09
     ERROR             = 0x0A
+    JOIN_SESSION      = 0x0B
 
 
 class CodecError(Exception):

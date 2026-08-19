@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from typing import Callable, Awaitable
 
 from engine.logging_.setup import get_logger, set_session_id
 from engine.protocol.chunk_msg import parse_chunk_payload
@@ -29,11 +30,12 @@ from engine.protocol.metadata import (
     parse_metadata_payload,
 )
 from engine.protocol.transfer_start import parse_transfer_start_payload
+from engine.protocol.join_session import parse_join_session_payload
 from engine.storage.file_io import write_file
 from engine.transfer.ack import AckTracker, build_ack_payload
 from engine.transfer.chunker import ChunkAssembler
 from engine.transfer.result import TransferResult
-from engine.transfer.session import TransferSession
+from engine.transfer.session import TransferSession, ConnectionPool
 from engine.transfer.state_machine import TransferStateMachine
 from engine.types import (
     DeviceId,
@@ -67,15 +69,60 @@ class TransferReceiver:
         self._display_name = local_display_name
         self._save_dir = save_dir
         self._auto_accept = auto_accept
+        self._frame_queue: asyncio.Queue[tuple[object, object]] = asyncio.Queue()
+        self._readers: list[asyncio.Task] = []
+        self._accept_task: asyncio.Task | None = None
+
+    async def _read_worker(self, conn: object) -> None:
+        """Continuously reads frames from a connection and puts them in a central queue."""
+        try:
+            while True:
+                frame = await conn.recv_frame()  # type: ignore[attr-defined]
+                await self._frame_queue.put((conn, frame))
+                if frame.msg_type in (MessageType.TRANSFER_COMPLETE, MessageType.CANCEL, MessageType.ERROR):
+                    break
+        except Exception as e:
+            await self._frame_queue.put((conn, e))
+
+    async def _accept_loop(self, conn_acceptor: Callable[[], Awaitable[object]], expected_session_id: str) -> None:
+        """Accept secondary connections and map them via JOIN_SESSION."""
+        try:
+            while True:
+                new_conn = await conn_acceptor()
+                logger.info("Accepted new connection, waiting for JOIN_SESSION...")
+                # Start a temporary task to handle the JOIN_SESSION
+                asyncio.create_task(self._handle_secondary_conn(new_conn, expected_session_id))
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning("Error in accept loop: %s", e)
+
+    async def _handle_secondary_conn(self, conn: object, expected_session_id: str) -> None:
+        try:
+            frame = await conn.recv_frame()  # type: ignore[attr-defined]
+            if frame.msg_type is MessageType.JOIN_SESSION:
+                session_id = parse_join_session_payload(frame.payload)
+                if session_id == expected_session_id:
+                    logger.info("Secondary connection mapped to session %s", session_id)
+                    task = asyncio.create_task(self._read_worker(conn))
+                    self._readers.append(task)
+                else:
+                    logger.warning("Rejected JOIN_SESSION for unknown session: %s", session_id)
+            else:
+                logger.warning("Expected JOIN_SESSION, got %s", frame.msg_type.name)
+        except Exception as e:
+            logger.warning("Error handling secondary connection: %s", e)
 
     async def run(
         self,
         conn: object,
+        conn_acceptor: Callable[[], Awaitable[object]] | None = None
     ) -> TransferResult:
         """Execute the full receiver flow on an open connection.
 
         Args:
             conn: A Connection-like object with send_frame/recv_frame.
+            conn_acceptor: Optional async factory to accept new secondary sockets.
 
         Returns:
             A TransferResult describing the outcome.
@@ -150,6 +197,13 @@ class TransferReceiver:
             sm.transition(TransferState.TRANSFERRING)
             logger.info("Transfer started")
 
+            # ── start reader tasks and acceptor ───────────────────────────
+            task = asyncio.create_task(self._read_worker(conn))
+            self._readers.append(task)
+            
+            if conn_acceptor:
+                self._accept_task = asyncio.create_task(self._accept_loop(conn_acceptor, session_id))
+
             # ── chunk loop ────────────────────────────────────────────────
             bytes_received = await self._receive_all_files(
                 conn, session, metadatas
@@ -191,6 +245,10 @@ class TransferReceiver:
             )
         finally:
             set_session_id(None)
+            for t in self._readers:
+                t.cancel()
+            if self._accept_task:
+                self._accept_task.cancel()
 
     # ── internal ──────────────────────────────────────────────────────────────
 
@@ -212,7 +270,7 @@ class TransferReceiver:
 
     async def _receive_all_files(
         self,
-        conn: object,
+        primary_conn: object,
         session: TransferSession,
         metadatas: list[FileMetadata],
     ) -> int:
@@ -228,7 +286,11 @@ class TransferReceiver:
         bytes_received = 0
 
         while True:
-            frame = await conn.recv_frame()  # type: ignore[attr-defined]
+            conn, frame = await self._frame_queue.get()
+            
+            if isinstance(frame, Exception):
+                logger.warning("Read error from a connection: %s", frame)
+                continue
 
             if frame.msg_type is MessageType.TRANSFER_COMPLETE:
                 logger.debug("Received TRANSFER_COMPLETE")
@@ -245,7 +307,7 @@ class TransferReceiver:
 
             # write chunk to assembler (validates per-chunk hash)
             try:
-                assemblers[chunk.file_index].write_chunk(chunk)
+                await assemblers[chunk.file_index].write_chunk(chunk)
             except (ValueError, IndexError) as exc:
                 logger.warning("Bad chunk %d:%d — %s", chunk.file_index, chunk.seq, exc)
                 continue
@@ -255,13 +317,17 @@ class TransferReceiver:
             tracker.ack(chunk.file_index, chunk.seq)
             bytes_received += len(chunk.data)
 
-            # send ACK for this file
+            # send ACK for this file (we route ACKs back on the connection that sent the chunk,
+            # which distributes the ACK load back to the sender)
             ack_payload = build_ack_payload(
                 session.session_id,
                 chunk.file_index,
                 tracker.bitmaps[chunk.file_index].received,
             )
-            await conn.send_frame(MessageType.ACK, ack_payload)  # type: ignore[attr-defined]
+            try:
+                await conn.send_frame(MessageType.ACK, ack_payload)  # type: ignore[attr-defined]
+            except Exception as e:
+                logger.debug("Failed to send ACK on connection: %s", e)
 
         # store assembled data in session for writing
         session._assemblers = assemblers  # type: ignore[attr-defined]

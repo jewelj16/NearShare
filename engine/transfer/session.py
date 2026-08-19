@@ -96,3 +96,27 @@ class TransferSession:
         expected = set(range(self.files[file_index].chunk_count))
         acked = self.ack_bitmaps.get(file_index, set())
         return expected - acked
+
+
+class ConnectionPool:
+    """Pool of active connections for multiplexing chunks across multiple sockets."""
+
+    def __init__(self, max_connections: int = 4):
+        self.max_connections = max_connections
+        self._conns: asyncio.Queue[object] = asyncio.Queue(maxsize=max_connections)
+        self.count = 0
+
+    def add(self, conn: object) -> None:
+        """Add a connection to the pool."""
+        if self.count >= self.max_connections:
+            raise RuntimeError(f"Connection pool is full (max {self.max_connections})")
+        self._conns.put_nowait(conn)
+        self.count += 1
+
+    async def get(self) -> object:
+        """Get the next available connection, blocking until one is free."""
+        return await self._conns.get()
+
+    def return_conn(self, conn: object) -> None:
+        """Return a connection back to the pool after use."""
+        self._conns.put_nowait(conn)

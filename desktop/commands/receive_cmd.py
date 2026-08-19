@@ -102,7 +102,10 @@ async def run_receive_auto(
             auto_accept=auto_accept,
         )
 
-        result = await receiver.run(conn)
+        async def _factory() -> object:
+            return await transport.connect(HOTSPOT_GATEWAY_IP, port)
+
+        result = await receiver.run(conn, conn_factory=_factory)
 
         if result.ok:
             print(f"\n✓ Transfer complete: {result}")

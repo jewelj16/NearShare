@@ -199,8 +199,11 @@ async def cmd_send(args: argparse.Namespace) -> int:
         local_display_name=display_name,
     )
 
+    async def _factory() -> object:
+        return await transport.connect(args.host, args.port)
+
     print(f"Sending {len(args.files)} file(s)...")
-    result = await sender.run(conn, args.files)
+    result = await sender.run(conn, args.files, conn_factory=_factory)
 
     if result.ok:
         print(f"\n✓ Transfer complete: {result}")
@@ -262,7 +265,10 @@ async def _receive_listen(
         auto_accept=args.auto_accept,
     )
 
-    result = await receiver.run(conn)
+    async def _acceptor() -> object:
+        return await transport.accept()
+
+    result = await receiver.run(conn, conn_acceptor=_acceptor)
     await transport.close()
 
     if result.ok:
