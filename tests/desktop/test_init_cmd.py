@@ -24,9 +24,9 @@ class TestRunInit:
 
         with patch("desktop.commands.init_cmd.take_wifi_snapshot", return_value=None), \
              patch("desktop.commands.init_cmd.create_hotspot",
-                   side_effect=RuntimeError("No Wi-Fi interface found")):
+                   side_effect=RuntimeError("No Wi-Fi interface found")), \
+             patch("builtins.input", side_effect=["", str(test_file), "", ""]):
             result = await run_init(
-                files=[test_file],
                 device_id=DEVICE_ID,
                 display_name="TestBox",
             )
@@ -55,16 +55,17 @@ class TestRunInit:
         mock_result = MagicMock(ok=True, __str__=lambda s: "OK")
 
         mock_sender = MagicMock()
-        mock_sender.run = AsyncMock(return_value=mock_result)
+        mock_sender.handshake = AsyncMock(return_value=MagicMock(display_name="Peer"))
+        mock_sender.send_files = AsyncMock(return_value=mock_result)
 
         with patch("desktop.commands.init_cmd.take_wifi_snapshot", return_value=None), \
              patch("desktop.commands.init_cmd.create_hotspot", return_value=mock_hotspot), \
              patch("desktop.commands.init_cmd.teardown_hotspot") as mock_teardown, \
              patch("desktop.commands.init_cmd.TcpTransport", return_value=mock_transport), \
-             patch("desktop.commands.init_cmd.TransferSender", return_value=mock_sender):
+             patch("desktop.commands.init_cmd.TransferSender", return_value=mock_sender), \
+             patch("builtins.input", side_effect=["MySpot", str(test_file), "", ""]):
 
             result = await run_init(
-                files=[test_file],
                 device_id=DEVICE_ID,
                 display_name="TestBox",
             )
@@ -93,10 +94,10 @@ class TestRunInit:
         with patch("desktop.commands.init_cmd.take_wifi_snapshot", return_value=None), \
              patch("desktop.commands.init_cmd.create_hotspot", return_value=mock_hotspot), \
              patch("desktop.commands.init_cmd.teardown_hotspot"), \
-             patch("desktop.commands.init_cmd.TcpTransport", return_value=mock_transport):
+             patch("desktop.commands.init_cmd.TcpTransport", return_value=mock_transport), \
+             patch("builtins.input", side_effect=["MySpot"]):
 
             result = await run_init(
-                files=[test_file],
                 device_id=DEVICE_ID,
                 display_name="TestBox",
             )

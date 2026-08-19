@@ -6,35 +6,13 @@ from unittest.mock import patch, MagicMock, call
 import pytest
 
 from desktop.network.hotspot import (
-    HOTSPOT_PASSWORD,
     HOTSPOT_SSID_PREFIX,
     HOTSPOT_GATEWAY_IP,
     HotspotInfo,
     create_hotspot,
-    generate_hotspot_ssid,
     is_hotspot_active,
     teardown_hotspot,
 )
-
-
-class TestGenerateSSID:
-    """Tests for generate_hotspot_ssid()."""
-
-    def test_has_correct_prefix(self) -> None:
-        ssid = generate_hotspot_ssid()
-        assert ssid.startswith(HOTSPOT_SSID_PREFIX)
-
-    def test_suffix_is_4_hex_chars(self) -> None:
-        ssid = generate_hotspot_ssid()
-        suffix = ssid[len(HOTSPOT_SSID_PREFIX):]
-        assert len(suffix) == 4
-        int(suffix, 16)  # should not raise
-
-    def test_generates_unique_ssids(self) -> None:
-        ssids = {generate_hotspot_ssid() for _ in range(20)}
-        # with 16-bit randomness, collisions in 20 samples are very unlikely
-        assert len(ssids) >= 15
-
 
 class TestCreateHotspot:
     """Tests for create_hotspot()."""
@@ -47,7 +25,7 @@ class TestCreateHotspot:
 
         assert info.interface == "wlo1"
         assert info.ssid.startswith(HOTSPOT_SSID_PREFIX)
-        assert info.password == HOTSPOT_PASSWORD
+        assert len(info.password) == 8
         assert info.gateway_ip == HOTSPOT_GATEWAY_IP
 
         # verify nmcli was called with the right args
@@ -55,6 +33,15 @@ class TestCreateHotspot:
         assert "hotspot" in args
         assert "wlo1" in args
         assert info.ssid in args
+
+    @patch("desktop.network.hotspot.find_wifi_interface", return_value="wlo1")
+    @patch("desktop.network.hotspot.subprocess.run")
+    def test_custom_ssid_and_password(self, mock_run: MagicMock, _: MagicMock) -> None:
+        mock_run.return_value = MagicMock()
+        info = create_hotspot(ssid_suffix="Bob", password="custom_pass")
+
+        assert info.ssid == f"{HOTSPOT_SSID_PREFIX}Bob"
+        assert info.password == "custom_pass"
 
     @patch("desktop.network.hotspot.find_wifi_interface", return_value=None)
     def test_raises_when_no_wifi_interface(self, _: MagicMock) -> None:
@@ -82,7 +69,7 @@ class TestTeardownHotspot:
     def test_calls_down_and_delete(self, mock_run: MagicMock) -> None:
         info = HotspotInfo(
             ssid="NearShare-abcd",
-            password=HOTSPOT_PASSWORD,
+            password="test_pass",
             interface="wlo1",
             gateway_ip=HOTSPOT_GATEWAY_IP,
             connection_name="NearShare-abcd",
@@ -100,7 +87,7 @@ class TestTeardownHotspot:
     def test_teardown_ignores_errors(self, _: MagicMock) -> None:
         info = HotspotInfo(
             ssid="NearShare-abcd",
-            password=HOTSPOT_PASSWORD,
+            password="test_pass",
             interface="wlo1",
             gateway_ip=HOTSPOT_GATEWAY_IP,
             connection_name="NearShare-abcd",

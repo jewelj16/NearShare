@@ -190,7 +190,7 @@ class TestSenderReject:
         transport = FakeTransport()
         client_conn = await transport.connect("127.0.0.1", 47321)
 
-        result = await _make_sender().run(
+        result = await _make_sender().send_files(
             client_conn, [tmp_path / "nonexistent.bin"]
         )
 

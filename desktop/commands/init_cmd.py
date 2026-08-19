@@ -1,12 +1,15 @@
-"""nearshare init — sender-side command that creates a hotspot and waits.
+"""nearshare init — sender-side command that creates a hotspot and waits interactively.
 
 Flow:
-  1. Save current Wi-Fi state
-  2. Create a NearShare hotspot
-  3. Start TCP listener on the hotspot network
-  4. Wait for the receiver to connect
-  5. Run the standard sender transfer flow
-  6. Tear down the hotspot and restore original Wi-Fi
+  1. Prompt for short SSID name.
+  2. Save current Wi-Fi state.
+  3. Create a NearShare hotspot (with random password).
+  4. Start TCP listener on the hotspot network.
+  5. Wait for the receiver to connect.
+  6. Perform handshake and show receiver name.
+  7. Prompt for files to send.
+  8. Run the standard sender transfer flow with progress bar.
+  9. Tear down the hotspot and restore original Wi-Fi.
 """
 
 from __future__ import annotations
@@ -14,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import atexit
 import logging
-import signal
 import sys
 from pathlib import Path
 
@@ -30,6 +32,8 @@ from desktop.network.wifi_state import (
     restore_wifi,
     take_wifi_snapshot,
 )
+from desktop.ui.logo import print_logo
+from desktop.ui.progress import ProgressBar
 from engine.transfer.sender import TransferSender
 from engine.types import DEFAULT_PORT, DeviceId
 
@@ -37,15 +41,13 @@ logger = logging.getLogger("nearshare.engine.commands")
 
 
 async def run_init(
-    files: list[Path],
     device_id: DeviceId,
     display_name: str,
     port: int = DEFAULT_PORT,
 ) -> int:
-    """Execute the 'init' command — create hotspot, wait for receiver, send files.
+    """Execute the interactive 'init' command.
 
     Args:
-        files:        Files to send.
         device_id:    Our device ID.
         display_name: Our display name.
         port:         TCP port to listen on.
@@ -53,6 +55,12 @@ async def run_init(
     Returns:
         Exit code (0 = success, 1 = failure).
     """
+    print_logo("SEND")
+
+    ssid_suffix = input("Enter a temporary name for your hotspot (max 6 chars): ").strip()
+    if not ssid_suffix:
+        ssid_suffix = None
+
     # save current Wi-Fi so we can restore it later
     wifi_snapshot = take_wifi_snapshot()
     hotspot_info: HotspotInfo | None = None
@@ -71,11 +79,10 @@ async def run_init(
 
     try:
         # create hotspot
-        print("Creating NearShare hotspot...")
-        hotspot_info = create_hotspot()
+        print("\nCreating NearShare hotspot...")
+        hotspot_info = create_hotspot(ssid_suffix=ssid_suffix)
         print(f"  SSID:     {hotspot_info.ssid}")
         print(f"  Password: {hotspot_info.password}")
-        print(f"  Gateway:  {hotspot_info.gateway_ip}")
         print()
 
         # start TCP listener on the hotspot gateway IP
@@ -84,27 +91,54 @@ async def run_init(
             listen_port=port,
         )
         actual_port = await transport.start()
-        print(f"Listening on {HOTSPOT_GATEWAY_IP}:{actual_port}")
-        print("Waiting for receiver to connect...\n")
+        print("Waiting for receivers to connect...\n")
 
         # wait for receiver
         try:
-            conn = await asyncio.wait_for(transport.accept(), timeout=120.0)
+            conn = await asyncio.wait_for(transport.accept(), timeout=300.0)
         except asyncio.TimeoutError:
-            print("Timed out waiting for receiver (2 minutes).", file=sys.stderr)
+            print("Timed out waiting for receiver (5 minutes).", file=sys.stderr)
             return 1
 
-        peer_host, peer_port = conn.peer_address
-        print(f"Receiver connected from {peer_host}:{peer_port}")
-
-        # run the standard sender flow
         sender = TransferSender(
             local_device_id=device_id,
             local_display_name=display_name,
         )
 
-        print(f"Sending {len(files)} file(s)...")
-        result = await sender.run(conn, files)
+        # perform handshake to get peer name
+        peer_info = await sender.handshake(conn)
+        print(f"\nDevice '{peer_info.display_name}' connected!\n")
+
+        # prompt for files
+        files_to_send: list[Path] = []
+        while True:
+            file_path = input("Enter a file path to send (or press Enter to finish): ").strip()
+            if not file_path:
+                if files_to_send:
+                    break
+                else:
+                    print("Please enter at least one file.")
+                    continue
+            
+            p = Path(file_path).expanduser().resolve()
+            if not p.exists():
+                print(f"Error: File not found: {p}")
+                continue
+            if p.is_dir():
+                print(f"Error: Directories not supported: {p}")
+                continue
+            
+            files_to_send.append(p)
+            print(f"Added {p.name}. Total files: {len(files_to_send)}")
+
+        input("\nPress Enter to start sending...")
+
+        bar = ProgressBar()
+        bar.start()
+
+        result = await sender.send_files(conn, files_to_send, on_progress=bar.update)
+        bar.finish()
+
         await transport.close()
 
         if result.ok:

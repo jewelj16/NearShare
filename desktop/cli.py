@@ -43,12 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
         "init",
         help="Create a hotspot and send files (auto-discovery mode)",
     )
-    init_p.add_argument(
-        "files",
-        nargs="+",
-        type=Path,
-        help="Files to send",
-    )
+
     init_p.add_argument(
         "--port",
         type=int,
@@ -163,12 +158,8 @@ def _validate_files(files: list[Path]) -> bool:
 
 async def cmd_init(args: argparse.Namespace) -> int:
     """Execute the 'init' subcommand (hotspot + send)."""
-    if not _validate_files(args.files):
-        return 1
-
     from desktop.commands.init_cmd import run_init
     return await run_init(
-        files=args.files,
         device_id=_get_device_id(),
         display_name=_get_display_name(args.name),
         port=args.port,

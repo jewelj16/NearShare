@@ -1,12 +1,12 @@
-"""nearshare receive (auto mode) — scan for hotspots and receive files.
+"""nearshare receive (auto mode) — scan for hotspots and receive files interactively.
 
-When the receiver runs without --host, it enters auto-discovery mode:
-  1. Save current Wi-Fi state
-  2. Scan for NearShare-* hotspots
-  3. Connect to the strongest one
-  4. Connect TCP to the sender at the hotspot gateway (10.42.0.1)
-  5. Run the standard receiver transfer flow
-  6. Disconnect from hotspot and restore original Wi-Fi
+Flow:
+  1. Print Logo (RECEIVE mode).
+  2. Prompt for username.
+  3. Scan and display a numbered list of NearShare-* hotspots.
+  4. Prompt for hotspot selection and password.
+  5. Connect to hotspot and start TCP connection.
+  6. Run receiver transfer flow with progress bar.
 """
 
 from __future__ import annotations
@@ -19,12 +19,18 @@ from pathlib import Path
 
 from desktop.adapters.tcp_transport import TcpTransport
 from desktop.network.hotspot import HOTSPOT_GATEWAY_IP
-from desktop.network.scanner import disconnect_from_hotspot, scan_and_connect
+from desktop.network.scanner import (
+    connect_to_hotspot,
+    disconnect_from_hotspot,
+    find_nearshare_hotspots,
+)
 from desktop.network.wifi_state import (
     WifiSnapshot,
     restore_wifi,
     take_wifi_snapshot,
 )
+from desktop.ui.logo import print_logo
+from desktop.ui.progress import ProgressBar
 from engine.transfer.receiver import TransferReceiver
 from engine.types import DEFAULT_PORT, DeviceId
 
@@ -39,19 +45,13 @@ async def run_receive_auto(
     port: int = DEFAULT_PORT,
     scan_timeout: float = 30.0,
 ) -> int:
-    """Execute auto-discovery receive — find hotspot, connect, receive files.
+    """Execute auto-discovery receive interactively."""
+    print_logo("RECEIVE")
 
-    Args:
-        device_id:    Our device ID.
-        display_name: Our display name.
-        save_dir:     Directory to save received files.
-        auto_accept:  If True, skip the accept/reject prompt.
-        port:         TCP port to connect to on the sender.
-        scan_timeout: How long to scan for hotspots before giving up.
+    user_name = input(f"Enter your display name (default: {display_name}): ").strip()
+    if user_name:
+        display_name = user_name
 
-    Returns:
-        Exit code (0 = success, 1 = failure).
-    """
     wifi_snapshot = take_wifi_snapshot()
     connected_ssid: str | None = None
 
@@ -66,24 +66,47 @@ async def run_receive_auto(
     atexit.register(_cleanup)
 
     try:
-        print("Scanning for NearShare hotspots...")
-        connected_ssid = scan_and_connect(timeout_s=scan_timeout)
-
-        if connected_ssid is None:
+        print("\nScanning for senders...")
+        hotspots = find_nearshare_hotspots()
+        
+        if not hotspots:
             print(
-                "No NearShare hotspots found. Make sure the sender has run "
-                "'nearshare init' first.",
+                "No senders found. Make sure the sender has run 'nearshare init' first.",
                 file=sys.stderr,
             )
             return 1
 
-        print(f"Connected to '{connected_ssid}'")
-        print(f"Connecting to sender at {HOTSPOT_GATEWAY_IP}:{port}...")
+        print("\nAvailable Senders:")
+        for i, hs in enumerate(hotspots, 1):
+            sender_name = hs.ssid.replace("NearShare-", "")
+            print(f"  {i}. {sender_name}")
+        
+        print()
+        while True:
+            choice = input("Select a sender (number): ").strip()
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(hotspots):
+                    selected_hotspot = hotspots[idx].ssid
+                    break
+            except ValueError:
+                pass
+            print("Invalid selection.")
+
+        password = input("Enter the password provided by the sender: ").strip()
+
+        print(f"\nConnecting to '{selected_hotspot}'...")
+        if not connect_to_hotspot(selected_hotspot, password):
+            print("Failed to connect to the hotspot. Incorrect password?", file=sys.stderr)
+            return 1
+            
+        connected_ssid = selected_hotspot
 
         # give the network a moment to settle after connecting
         await asyncio.sleep(1.0)
 
-        # connect TCP to the sender (which is always at the gateway IP)
+        print(f"Connecting to sender at {HOTSPOT_GATEWAY_IP}:{port}...")
+
         transport = TcpTransport()
         try:
             conn = await asyncio.wait_for(
@@ -94,7 +117,6 @@ async def run_receive_auto(
             print(f"Failed to connect to sender: {exc}", file=sys.stderr)
             return 1
 
-        # run the standard receiver flow
         receiver = TransferReceiver(
             local_device_id=device_id,
             local_display_name=display_name,
@@ -102,7 +124,22 @@ async def run_receive_auto(
             auto_accept=auto_accept,
         )
 
-        result = await receiver.run(conn)
+        bar = ProgressBar()
+        
+        # intercept the print statements inside TransferReceiver by creating an on_progress callback
+        # the receiver will still print to stdout.
+        # Ideally, we should suppress the logs/prints in receiver if on_progress is provided, 
+        # but for now we just pass it.
+        def _on_progress(bytes_done: int, total_bytes: int):
+            if bar.start_time is None:
+                print()  # Add a newline before the bar starts
+                bar.start()
+            bar.update(bytes_done, total_bytes)
+
+        result = await receiver.run(conn, on_progress=_on_progress)
+        
+        if bar.start_time is not None:
+            bar.finish()
 
         if result.ok:
             print(f"\n✓ Transfer complete: {result}")
