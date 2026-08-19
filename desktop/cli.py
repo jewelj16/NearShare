@@ -24,6 +24,18 @@ from engine.types import DEFAULT_PORT, DeviceId
 logger = logging.getLogger("nearshare.cli")
 
 
+def _get_default_save_dir() -> Path:
+    """Return the default save directory, resolving SUDO_USER if running as root."""
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        import pwd
+        try:
+            return Path(pwd.getpwnam(sudo_user).pw_dir) / "Downloads" / "NearShare"
+        except KeyError:
+            pass
+    return Path.home() / "Downloads" / "NearShare"
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the NearShare CLI."""
     parser = argparse.ArgumentParser(
@@ -86,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     recv_p.add_argument(
         "--save-dir",
         type=Path,
-        default=Path.home() / "Downloads" / "NearShare",
+        default=_get_default_save_dir(),
         help="Directory to save received files (default ~/Downloads/NearShare)",
     )
     recv_p.add_argument(
