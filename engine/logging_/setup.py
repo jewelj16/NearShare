@@ -73,7 +73,7 @@ def setup_engine_logging(
 
     # avoid duplicate handlers on repeated calls
     if not logger.handlers:
-        handler = logging.StreamHandler()
+        handler = logging.FileHandler("logs.txt")
         handler.setLevel(level)
         formatter = logging.Formatter(fmt)
         handler.setFormatter(formatter)

@@ -51,9 +51,8 @@ class HotspotInfo:
 
 
 def generate_hotspot_password() -> str:
-    """Generate a random 8-character alphanumeric password."""
-    alphabet = string.ascii_letters + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(8))
+    """Generate a random 8-digit numeric password."""
+    return "".join(secrets.choice(string.digits) for _ in range(8))
 
 
 def create_hotspot(
