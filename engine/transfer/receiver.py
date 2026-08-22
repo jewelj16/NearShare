@@ -235,7 +235,15 @@ class TransferReceiver:
         tracker = AckTracker(session.session_id, metadatas)
 
         # create assemblers for each file
-        assemblers = [ChunkAssembler(meta) for meta in metadatas]
+        from engine.storage.file_store import ConflictRenamer
+        self._save_dir.mkdir(parents=True, exist_ok=True)
+        dest_paths = [
+            ConflictRenamer.resolve(self._save_dir, meta.name)
+            for meta in metadatas
+        ]
+        assemblers = [
+            ChunkAssembler(meta, dest) for meta, dest in zip(metadatas, dest_paths)
+        ]
         bytes_received = 0
 
         while True:
@@ -256,7 +264,7 @@ class TransferReceiver:
 
             # write chunk to assembler (validates per-chunk hash)
             try:
-                assemblers[chunk.file_index].write_chunk(chunk)
+                await assemblers[chunk.file_index].write_chunk(chunk)
             except (ValueError, IndexError) as exc:
                 logger.warning("Bad chunk %d:%d — %s", chunk.file_index, chunk.seq, exc)
                 continue
@@ -286,17 +294,21 @@ class TransferReceiver:
         metadatas: list[FileMetadata],
         session: TransferSession,
     ) -> list[Path]:
-        """Write all assembled files to disk."""
+        """Finalize all assembled files on disk."""
         assemblers: list[ChunkAssembler] = session._assemblers  # type: ignore[attr-defined]
         saved: list[Path] = []
 
         for meta, assembler in zip(metadatas, assemblers):
+            try:
+                assembler.close()
+            except Exception as e:
+                logger.error("Error closing assembler for %s: %s", meta.name, e)
+            
             if not assembler.is_complete:
                 logger.warning("File %s incomplete, skipping", meta.name)
                 continue
-            data = assembler.to_bytes()
-            dest = write_file(self._save_dir, meta, data)
-            logger.info("Saved %s → %s", meta.name, dest)
-            saved.append(dest)
+            
+            logger.info("Saved %s → %s", meta.name, assembler.path)
+            saved.append(assembler.path)
 
         return saved

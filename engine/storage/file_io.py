@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import os
+import mmap
 from pathlib import Path
 
 from engine.storage.file_store import ConflictRenamer
@@ -58,26 +59,47 @@ def file_metadata_from_path(
     )
 
 
-def read_file_bytes(path: Path) -> bytes:
-    """Read an entire file into memory.
-
-    Args:
-        path: Path to the file.
-
-    Returns:
-        The raw file bytes.
-
-    Raises:
-        FileNotFoundError: If the path does not exist.
-        IsADirectoryError: If the path is a directory.
-        OSError: For other I/O errors.
+class MemoryMappedFile:
+    """Context manager for safely mapping a file into memory via mmap.
+    
+    Provides zero-copy access for reading, and efficient seek-based writing
+    for large files without loading everything into RAM.
     """
-    path = path.resolve()
-    if not path.exists():
-        raise FileNotFoundError(f"No such file: {path}")
-    if path.is_dir():
-        raise IsADirectoryError(f"Path is a directory: {path}")
-    return path.read_bytes()
+    def __init__(self, path: Path, write: bool = False, size: int = 0) -> None:
+        self.path = path.resolve()
+        self.write = write
+        self.size = size
+        self._f = None
+        self._mmap = None
+
+    def __enter__(self):
+        if self.write:
+            if not self.path.parent.exists():
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+            if not self.path.exists() or self.path.stat().st_size != self.size:
+                with self.path.open("wb") as f:
+                    f.truncate(self.size)
+            self._f = self.path.open("r+b")
+            if self.size == 0:
+                self._mmap = bytearray()
+            else:
+                self._mmap = mmap.mmap(self._f.fileno(), self.size, access=mmap.ACCESS_WRITE)
+        else:
+            if not self.path.exists():
+                raise FileNotFoundError(f"No such file: {self.path}")
+            if self.path.stat().st_size == 0:
+                self._mmap = b""
+            else:
+                self._f = self.path.open("rb")
+                self._mmap = mmap.mmap(self._f.fileno(), 0, access=mmap.ACCESS_READ)
+        return self._mmap
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if isinstance(self._mmap, mmap.mmap):
+            self._mmap.close()
+        if self._f:
+            self._f.close()
+
 
 
 # ── writing ───────────────────────────────────────────────────────────────────

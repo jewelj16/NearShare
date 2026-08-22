@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Callable
 
@@ -27,7 +28,7 @@ from engine.protocol.handshake import perform_handshake, HandshakeError, PeerInf
 from engine.protocol.metadata import send_metadata, wait_for_accept_or_reject
 from engine.protocol.transfer_start import build_transfer_start_payload
 from engine.transfer.ack import parse_ack_payload
-from engine.storage.file_io import file_metadata_from_path, read_file_bytes
+from engine.storage.file_io import file_metadata_from_path, MemoryMappedFile
 from engine.transfer.result import TransferResult
 from engine.transfer.session import TransferSession
 from engine.transfer.state_machine import TransferStateMachine
@@ -98,15 +99,18 @@ class TransferSender:
             self._start_time = time.monotonic()
 
         metadatas: list[FileMetadata] = []
-        file_data: list[bytes] = []
+        file_data = []
+        stack = ExitStack()
 
         try:
             for p in files:
                 meta = file_metadata_from_path(p, self._chunk_size)
-                data = read_file_bytes(p)
+                mmap_ctx = MemoryMappedFile(p)
+                mmap_obj = stack.enter_context(mmap_ctx)
                 metadatas.append(meta)
-                file_data.append(data)
+                file_data.append(mmap_obj)
         except OSError as exc:
+            stack.close()
             return TransferResult.failure(
                 session_id="<pre-session>",
                 files=[],
@@ -188,6 +192,7 @@ class TransferSender:
                 error_msg=str(exc),
             )
         finally:
+            stack.close()
             set_session_id(None)
 
     async def run(
@@ -214,7 +219,7 @@ class TransferSender:
         conn: object,
         session: TransferSession,
         metadatas: list[FileMetadata],
-        file_data: list[bytes],
+        file_data: list[memoryview],
         on_progress: Callable[[int, int], None] | None,
         total_transfer_bytes: int,
     ) -> int:
@@ -229,9 +234,9 @@ class TransferSender:
             async def _send_file_chunks(
                 _fi: int = fi,
                 _meta: FileMetadata = meta,
-                _data: bytes = data,
+                _data: memoryview = data,
             ) -> None:
-                for chunk in split(_data, _meta, session.session_id, _fi):
+                async for chunk in split(_data, _meta, session.session_id, _fi):
                     await window.wait_for_space()
                     await conn.send_frame(  # type: ignore[attr-defined]
                         MessageType.CHUNK, build_chunk_payload(chunk)
