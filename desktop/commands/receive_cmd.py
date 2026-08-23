@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 from desktop.adapters.tcp_transport import TcpTransport
-from desktop.network.hotspot import HOTSPOT_GATEWAY_IP
+from desktop.network.hotspot import HOTSPOT_GATEWAY_IP, ANDROID_HOTSPOT_GATEWAY_IP
 from desktop.network.scanner import (
     connect_to_hotspot,
     disconnect_from_hotspot,
@@ -78,8 +78,14 @@ async def run_receive_auto(
 
         print("\nAvailable Senders:")
         for i, hs in enumerate(hotspots, 1):
-            sender_name = hs.ssid.replace("NearShare-", "")
-            print(f"  {i}. {sender_name}")
+            if hs.is_android:
+                # Android SSIDs look like AndroidShare_2651
+                sender_name = hs.ssid.replace("AndroidShare_", "Mobile_")
+                sender_type = "Mobile"
+            else:
+                sender_name = hs.ssid.replace("NearShare-", "")
+                sender_type = "PC"
+            print(f"  {i}. {sender_name} ({sender_type})")
         
         print()
         while True:
@@ -87,7 +93,7 @@ async def run_receive_auto(
             try:
                 idx = int(choice) - 1
                 if 0 <= idx < len(hotspots):
-                    selected_hotspot = hotspots[idx].ssid
+                    selected_hotspot = hotspots[idx]
                     break
             except ValueError:
                 pass
@@ -95,22 +101,23 @@ async def run_receive_auto(
 
         password = input("Enter the password provided by the sender: ").strip()
 
-        print(f"\nConnecting to '{selected_hotspot}'...")
-        if not connect_to_hotspot(selected_hotspot, password):
+        print(f"\nConnecting to '{selected_hotspot.ssid}'...")
+        if not connect_to_hotspot(selected_hotspot.ssid, password):
             print("Failed to connect to the hotspot. Incorrect password?", file=sys.stderr)
             return 1
             
-        connected_ssid = selected_hotspot
+        connected_ssid = selected_hotspot.ssid
 
         # give the network a moment to settle after connecting
         await asyncio.sleep(1.0)
 
-        print(f"Connecting to sender at {HOTSPOT_GATEWAY_IP}:{port}...")
+        target_ip = ANDROID_HOTSPOT_GATEWAY_IP if selected_hotspot.is_android else HOTSPOT_GATEWAY_IP
+        print(f"Connecting to sender at {target_ip}:{port}...")
 
         transport = TcpTransport()
         try:
             conn = await asyncio.wait_for(
-                transport.connect(HOTSPOT_GATEWAY_IP, port),
+                transport.connect(target_ip, port),
                 timeout=10.0,
             )
         except (OSError, asyncio.TimeoutError) as exc:

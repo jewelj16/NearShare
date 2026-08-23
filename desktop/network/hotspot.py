@@ -23,9 +23,15 @@ logger = logging.getLogger("nearshare.engine.network")
 # all NearShare hotspots use this prefix so the receiver can find them
 HOTSPOT_SSID_PREFIX = "NearShare-"
 
+# Android's LocalOnlyHotspot uses this prefix (uncontrollable by the app)
+ANDROID_HOTSPOT_PREFIX = "AndroidShare_"
+
 # fixed well-known password for v1 (security rationale: hotspot is ephemeral,
 # all actual data goes over TLS, and receiver still gets an accept/reject prompt)
 HOTSPOT_PASSWORD = "NearShare2026"
+
+# Android local-only hotspot gateway (Android always uses this IP)
+ANDROID_HOTSPOT_GATEWAY_IP = "192.168.49.1"
 
 # the gateway IP that NetworkManager assigns to the hotspot creator
 HOTSPOT_GATEWAY_IP = "10.42.0.1"
