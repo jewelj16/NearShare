@@ -56,7 +56,7 @@ class TransferSender:
     Args:
         local_device_id:    Our DeviceId (announced in HELLO).
         local_display_name: Our display name.
-        chunk_size:         Chunk size in bytes (default 1 MB).
+        chunk_size:         Chunk size in bytes (default 64 KB).
         window_capacity:    Sliding window size (default 128).
     """
 

@@ -30,7 +30,7 @@ def file_metadata_from_path(
 
     Args:
         path:       Absolute or relative path to the file.
-        chunk_size: Chunk size to use for this transfer (default 256 KB).
+        chunk_size: Chunk size to use for this transfer (default 64 KB).
 
     Returns:
         A populated FileMetadata.
