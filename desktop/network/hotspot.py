@@ -24,7 +24,7 @@ logger = logging.getLogger("nearshare.engine.network")
 HOTSPOT_SSID_PREFIX = "NearShare-"
 
 # Android's LocalOnlyHotspot uses this prefix (uncontrollable by the app)
-ANDROID_HOTSPOT_PREFIX = "AndroidShare_"
+ANDROID_HOTSPOT_PREFIX = "DIRECT-ns"
 
 # fixed well-known password for v1 (security rationale: hotspot is ephemeral,
 # all actual data goes over TLS, and receiver still gets an accept/reject prompt)
