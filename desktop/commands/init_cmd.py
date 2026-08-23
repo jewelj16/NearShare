@@ -44,6 +44,7 @@ async def run_init(
     device_id: DeviceId,
     display_name: str,
     port: int = DEFAULT_PORT,
+    files: list[Path] | None = None,
 ) -> int:
     """Execute the interactive 'init' command.
 
@@ -109,29 +110,31 @@ async def run_init(
         peer_info = await sender.handshake(conn)
         print(f"\nDevice '{peer_info.display_name}' connected!\n")
 
-        # prompt for files
-        files_to_send: list[Path] = []
-        while True:
-            file_path = input("Enter a file path to send (or press Enter to finish): ").strip()
-            if not file_path:
-                if files_to_send:
-                    break
-                else:
-                    print("Please enter at least one file.")
+        # prompt for files if not provided on the command line
+        files_to_send: list[Path] = files or []
+        if not files_to_send:
+            while True:
+                file_path = input("Enter a file path to send (or press Enter to finish): ").strip()
+                if not file_path:
+                    if files_to_send:
+                        break
+                    else:
+                        print("Please enter at least one file.")
+                        continue
+                
+                p = Path(file_path).expanduser().resolve()
+                if not p.exists():
+                    print(f"Error: File not found: {p}")
                     continue
-            
-            p = Path(file_path).expanduser().resolve()
-            if not p.exists():
-                print(f"Error: File not found: {p}")
-                continue
-            if p.is_dir():
-                print(f"Error: Directories not supported: {p}")
-                continue
-            
-            files_to_send.append(p)
-            print(f"Added {p.name}. Total files: {len(files_to_send)}")
+                if p.is_dir():
+                    print(f"Error: Directories not supported: {p}")
+                    continue
+                
+                files_to_send.append(p)
+                print(f"Added {p.name}. Total files: {len(files_to_send)}")
 
-        input("\nPress Enter to start sending...")
+        print(f"\nReady to send {len(files_to_send)} file(s).")
+        input("Press Enter to start sending...")
 
         bar = ProgressBar()
         bar.start()

@@ -57,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init_p.add_argument(
         "files",
-        nargs="+",
+        nargs="*",
         type=Path,
         help="Files to send",
     )
@@ -175,7 +175,7 @@ def _validate_files(files: list[Path]) -> bool:
 
 async def cmd_init(args: argparse.Namespace) -> int:
     """Execute the 'init' subcommand (hotspot + send)."""
-    if not _validate_files(args.files):
+    if args.files and not _validate_files(args.files):
         return 1
 
     from desktop.commands.init_cmd import run_init
