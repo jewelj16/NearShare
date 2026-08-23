@@ -8,7 +8,7 @@ import pytest
 from engine.storage.file_io import (
     _compute_sha256,
     file_metadata_from_path,
-    read_file_bytes,
+    MemoryMappedFile,
     write_file,
 )
 from engine.types import DEFAULT_CHUNK_SIZE, FileMetadata
@@ -77,28 +77,33 @@ class TestFileMetadataFromPath:
             file_metadata_from_path(tmp_path)
 
 
-# ── read_file_bytes ───────────────────────────────────────────────────────────
+# ── MemoryMappedFile ───────────────────────────────────────────────────────────
 
-class TestReadFileBytes:
-    """Read file content into memory."""
+class TestMemoryMappedFile:
+    """Read and write via mmap."""
 
     def test_reads_content(self, tmp_path: Path) -> None:
         f = tmp_path / "data.bin"
         f.write_bytes(b"\x00\x01\x02\x03")
-        assert read_file_bytes(f) == b"\x00\x01\x02\x03"
+        with MemoryMappedFile(f) as mmap_obj:
+            assert bytes(mmap_obj) == b"\x00\x01\x02\x03"
 
     def test_reads_empty_file(self, tmp_path: Path) -> None:
         f = tmp_path / "empty.bin"
         f.write_bytes(b"")
-        assert read_file_bytes(f) == b""
+        with MemoryMappedFile(f) as mmap_obj:
+            assert bytes(mmap_obj) == b""
+
+    def test_writes_content(self, tmp_path: Path) -> None:
+        f = tmp_path / "out.bin"
+        with MemoryMappedFile(f, write=True, size=4) as mmap_obj:
+            mmap_obj[:] = b"\x00\x01\x02\x03"
+        assert f.read_bytes() == b"\x00\x01\x02\x03"
 
     def test_missing_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
-            read_file_bytes(tmp_path / "nope.bin")
-
-    def test_directory_raises(self, tmp_path: Path) -> None:
-        with pytest.raises(IsADirectoryError):
-            read_file_bytes(tmp_path)
+            with MemoryMappedFile(tmp_path / "nope.bin"):
+                pass
 
 
 # ── write_file ────────────────────────────────────────────────────────────────

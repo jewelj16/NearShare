@@ -24,16 +24,16 @@ from engine.types import DEFAULT_PORT, DeviceId
 logger = logging.getLogger("nearshare.cli")
 
 
-def _get_default_save_dir() -> Path:
-    """Return the default save directory, resolving SUDO_USER if running as root."""
+def get_real_home() -> Path:
+    """Return the real user's home directory, even if run with sudo."""
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
         import pwd
         try:
-            return Path(pwd.getpwnam(sudo_user).pw_dir) / "Downloads" / "NearShare"
+            return Path(pwd.getpwnam(sudo_user).pw_dir)
         except KeyError:
             pass
-    return Path.home() / "Downloads" / "NearShare"
+    return Path.home()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,7 +55,12 @@ def build_parser() -> argparse.ArgumentParser:
         "init",
         help="Create a hotspot and send files (auto-discovery mode)",
     )
-
+    init_p.add_argument(
+        "files",
+        nargs="*",
+        type=Path,
+        help="Files to send",
+    )
     init_p.add_argument(
         "--port",
         type=int,
@@ -98,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     recv_p.add_argument(
         "--save-dir",
         type=Path,
-        default=_get_default_save_dir(),
+        default=get_real_home() / "Downloads" / "NearShare",
         help="Directory to save received files (default ~/Downloads/NearShare)",
     )
     recv_p.add_argument(
@@ -170,8 +175,12 @@ def _validate_files(files: list[Path]) -> bool:
 
 async def cmd_init(args: argparse.Namespace) -> int:
     """Execute the 'init' subcommand (hotspot + send)."""
+    if args.files and not _validate_files(args.files):
+        return 1
+
     from desktop.commands.init_cmd import run_init
     return await run_init(
+        files=args.files,
         device_id=_get_device_id(),
         display_name=_get_display_name(args.name),
         port=args.port,
@@ -202,8 +211,11 @@ async def cmd_send(args: argparse.Namespace) -> int:
         local_display_name=display_name,
     )
 
+    async def _factory() -> object:
+        return await transport.connect(args.host, args.port)
+
     print(f"Sending {len(args.files)} file(s)...")
-    result = await sender.run(conn, args.files)
+    result = await sender.run(conn, args.files, conn_factory=_factory)
 
     if result.ok:
         print(f"\n✓ Transfer complete: {result}")
@@ -265,7 +277,10 @@ async def _receive_listen(
         auto_accept=args.auto_accept,
     )
 
-    result = await receiver.run(conn)
+    async def _acceptor() -> object:
+        return await transport.accept()
+
+    result = await receiver.run(conn, conn_acceptor=_acceptor)
     await transport.close()
 
     if result.ok:

@@ -5,8 +5,11 @@ Full async flow:
   2. Send METADATA, wait for ACCEPT or REJECT
   3. Send TRANSFER_START
   4. Chunk loop — split each file, send through SendWindow,
-     receive ACKs concurrently per file
+     receive ACKs concurrently via a single shared ACK reader
   5. Send TRANSFER_COMPLETE once all files are fully ACK'd
+
+Phase 3 (TCP Multiplexing): all files are sent concurrently on the single
+connection — one asyncio task per file, one shared ACK-reader task.
 
 Uses TransferStateMachine to enforce state transitions and
 structured logging with session_id context.
@@ -16,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Callable
 
@@ -27,7 +31,7 @@ from engine.protocol.handshake import perform_handshake, HandshakeError, PeerInf
 from engine.protocol.metadata import send_metadata, wait_for_accept_or_reject
 from engine.protocol.transfer_start import build_transfer_start_payload
 from engine.transfer.ack import parse_ack_payload
-from engine.storage.file_io import file_metadata_from_path, read_file_bytes
+from engine.storage.file_io import file_metadata_from_path, MemoryMappedFile
 from engine.transfer.result import TransferResult
 from engine.transfer.session import TransferSession
 from engine.transfer.state_machine import TransferStateMachine
@@ -52,8 +56,8 @@ class TransferSender:
     Args:
         local_device_id:    Our DeviceId (announced in HELLO).
         local_display_name: Our display name.
-        chunk_size:         Chunk size in bytes (default 256 KB).
-        window_capacity:    Sliding window size (default 32).
+        chunk_size:         Chunk size in bytes (default 64 KB).
+        window_capacity:    Sliding window size (default 128).
     """
 
     def __init__(
@@ -98,15 +102,18 @@ class TransferSender:
             self._start_time = time.monotonic()
 
         metadatas: list[FileMetadata] = []
-        file_data: list[bytes] = []
+        file_data = []
+        stack = ExitStack()
 
         try:
             for p in files:
                 meta = file_metadata_from_path(p, self._chunk_size)
-                data = read_file_bytes(p)
+                mmap_ctx = MemoryMappedFile(p)
+                mmap_obj = stack.enter_context(mmap_ctx)
                 metadatas.append(meta)
-                file_data.append(data)
+                file_data.append(mmap_obj)
         except OSError as exc:
+            stack.close()
             return TransferResult.failure(
                 session_id="<pre-session>",
                 files=[],
@@ -146,7 +153,7 @@ class TransferSender:
                 build_transfer_start_payload(session.session_id),
             )
             logger.info("Sending %d file(s)", len(metadatas))
-            
+
             if on_progress:
                 on_progress(0, total_bytes)
 
@@ -188,6 +195,7 @@ class TransferSender:
                 error_msg=str(exc),
             )
         finally:
+            stack.close()
             set_session_id(None)
 
     async def run(
@@ -214,84 +222,105 @@ class TransferSender:
         conn: object,
         session: TransferSession,
         metadatas: list[FileMetadata],
-        file_data: list[bytes],
+        file_data: list[memoryview],
         on_progress: Callable[[int, int], None] | None,
         total_transfer_bytes: int,
     ) -> int:
+        """Send all files concurrently over the single TCP connection.
+
+        Phase 3 — TCP Multiplexing:
+        Each file gets its own chunk-sender coroutine and its own SendWindow.
+        A single shared ACK-reader coroutine reads all incoming ACK frames and
+        dispatches them to the correct window by file_index.  This keeps the
+        TCP pipe saturated even during ACK round-trips for any individual file.
+
+        Returns:
+            Total bytes sent across all files.
+        """
         session.init_ack_bitmaps()
-        bytes_sent = 0
 
-        for fi, (meta, data) in enumerate(zip(metadatas, file_data)):
+        # One independent SendWindow per file for per-file backpressure
+        windows = [SendWindow(self._window_capacity) for _ in metadatas]
+
+        # Each sender sets this event when its last chunk has been sent
+        all_chunks_sent = [asyncio.Event() for _ in metadatas]
+
+        # Serialise frame writes: asyncio doesn't guarantee atomic writes for
+        # concurrent coroutines on the same stream, so we mutex send_frame.
+        send_lock = asyncio.Lock()
+
+        # ── per-file chunk sender ─────────────────────────────────────────────
+
+        async def _send_one_file(
+            fi: int,
+            meta: FileMetadata,
+            data: memoryview,
+        ) -> None:
             logger.debug("Sending file %d: %s (%d bytes)", fi, meta.name, meta.size)
-            window = SendWindow(self._window_capacity)
-            file_done = asyncio.Event()
-
-            async def _send_file_chunks(
-                _fi: int = fi,
-                _meta: FileMetadata = meta,
-                _data: bytes = data,
-            ) -> None:
-                for chunk in split(_data, _meta, session.session_id, _fi):
-                    await window.wait_for_space()
+            async for chunk in split(data, meta, session.session_id, fi):
+                await windows[fi].wait_for_space()
+                async with send_lock:
                     await conn.send_frame(  # type: ignore[attr-defined]
                         MessageType.CHUNK, build_chunk_payload(chunk)
                     )
-                    window.mark_sent(chunk.seq)
-                file_done.set()
+                windows[fi].mark_sent(chunk.seq)
+            all_chunks_sent[fi].set()
+            logger.debug("File %d: all chunks sent", fi)
 
-            async def _recv_file_acks(_fi: int = fi) -> None:
-                while not session.is_file_complete(_fi):
-                    try:
-                        frame = await asyncio.wait_for(
-                            conn.recv_frame(),  # type: ignore[attr-defined]
-                            timeout=30.0,
-                        )
-                    except (asyncio.TimeoutError, TimeoutError):
-                        if file_done.is_set():
-                            break
-                        continue
-                    except OSError:
+        # ── shared ACK reader ─────────────────────────────────────────────────
+
+        async def _ack_reader() -> None:
+            """Read ACK frames and fan them out to the correct file's window."""
+            while not session.is_transfer_complete():
+                try:
+                    frame = await asyncio.wait_for(
+                        conn.recv_frame(),  # type: ignore[attr-defined]
+                        timeout=30.0,
+                    )
+                except (asyncio.TimeoutError, TimeoutError):
+                    # All chunks have been sent but we timed out waiting for the
+                    # final ACKs — give up to avoid hanging indefinitely.
+                    if all(e.is_set() for e in all_chunks_sent):
+                        logger.warning("ACK timeout after all chunks sent — giving up")
                         break
-                    if frame.msg_type is MessageType.ACK:
-                        _, ack_fi, seqs = parse_ack_payload(frame.payload)
-                        if ack_fi == _fi:
-                            for seq in seqs:
-                                await session.ack_chunk_safe(_fi, seq)
-                                window.ack(seq)
-                                if on_progress:
-                                    # Very approximate progress update (assumes chunks are same size)
-                                    # Real correct tracking would use total ACKed bytes
-                                    # For simplicity here we just do a rough increment if needed, 
-                                    # or we can ask session for total acked bytes.
-                                    pass
+                    continue
+                except OSError:
+                    break
 
-            send_task = asyncio.create_task(_send_file_chunks())
-            ack_task = asyncio.create_task(_recv_file_acks())
-            
-            # Progress loop
-            async def _progress_loop():
-                if not on_progress:
-                    return
-                while not session.is_file_complete(fi):
-                    # calculate total acked across all files so far plus current file
-                    current_acked = bytes_sent + session.get_file_bytes_acked(fi, self._chunk_size)
-                    on_progress(current_acked, total_transfer_bytes)
-                    await asyncio.sleep(0.1)
+                if frame.msg_type is not MessageType.ACK:
+                    continue
 
-            prog_task = asyncio.create_task(_progress_loop())
+                _, ack_fi, seqs = parse_ack_payload(frame.payload)
+                if 0 <= ack_fi < len(windows):
+                    for seq in seqs:
+                        await session.ack_chunk_safe(ack_fi, seq)
+                        windows[ack_fi].ack(seq)
 
-            try:
-                await asyncio.gather(send_task, ack_task)
-            except Exception:
-                send_task.cancel()
-                ack_task.cancel()
-                prog_task.cancel()
-                raise
-            
-            prog_task.cancel()
-            bytes_sent += meta.size
-            if on_progress:
-                on_progress(bytes_sent, total_transfer_bytes)
+                # Emit an accurate progress update after every ACK burst
+                if on_progress:
+                    acked_bytes = sum(
+                        session.get_file_bytes_acked(i, metadatas[i].chunk_size)
+                        for i in range(len(metadatas))
+                    )
+                    on_progress(acked_bytes, total_transfer_bytes)
 
-        return bytes_sent
+        # ── launch all file senders + the shared ACK reader concurrently ──────
 
+        sender_tasks = [
+            asyncio.create_task(_send_one_file(fi, meta, data))
+            for fi, (meta, data) in enumerate(zip(metadatas, file_data))
+        ]
+        ack_task = asyncio.create_task(_ack_reader())
+
+        try:
+            await asyncio.gather(*sender_tasks, ack_task)
+        except Exception:
+            for t in sender_tasks:
+                t.cancel()
+            ack_task.cancel()
+            raise
+
+        if on_progress:
+            on_progress(total_transfer_bytes, total_transfer_bytes)
+
+        return total_transfer_bytes

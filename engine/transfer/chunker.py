@@ -12,25 +12,30 @@ writes into a pre-allocated buffer.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Generator
+import asyncio
+from collections.abc import AsyncGenerator
+from pathlib import Path
 
 from engine.types import Chunk, FileMetadata
 
+def _hash_piece(piece: bytes) -> str:
+    return hashlib.sha256(piece).hexdigest()
 
-def split(
-    data: bytes,
+async def split(
+    data: memoryview,
     metadata: FileMetadata,
     transfer_id: str,
     file_index: int = 0,
-) -> Generator[Chunk, None, None]:
+) -> AsyncGenerator[Chunk, None]:
     """Split file data into Chunk objects according to metadata.chunk_size.
 
-    Yields one Chunk per slice, computing the per-chunk SHA-256 on the fly.
+    Yields one Chunk per slice, computing the per-chunk SHA-256 on the fly
+    in a background thread.
     The last chunk may be smaller than chunk_size if the file size is not
     an exact multiple.
 
     Args:
-        data:        The complete file contents as bytes.
+        data:        A memoryview or mmap object containing the file contents.
         metadata:    FileMetadata describing the file (uses chunk_size).
         transfer_id: Session ID to stamp on every chunk.
         file_index:  Zero-based index of this file in the transfer.
@@ -41,17 +46,20 @@ def split(
     chunk_size = metadata.chunk_size
     offset = 0
     seq = 0
+    loop = asyncio.get_running_loop()
 
     while offset < len(data):
         end = min(offset + chunk_size, len(data))
         piece = data[offset:end]
-        sha = hashlib.sha256(piece).hexdigest()
+        
+        # Offload hashing to ThreadPoolExecutor
+        sha = await loop.run_in_executor(None, _hash_piece, piece)
 
         yield Chunk(
             transfer_id=transfer_id,
             file_index=file_index,
             seq=seq,
-            data=piece,
+            data=piece if isinstance(piece, bytes) else bytes(piece),
             sha256=sha,
         )
 
@@ -62,26 +70,28 @@ def split(
 class ChunkAssembler:
     """Reassembles a file from chunks arriving in any order.
 
-    Pre-allocates a bytearray of the expected file size and writes each
-    chunk at its correct byte offset (seek-based).  Duplicate writes for
-    the same sequence number are silently ignored.
+    Uses MemoryMappedFile to write chunks directly to disk via virtual memory.
+    Duplicate writes for the same sequence number are silently ignored.
 
     Attributes:
         metadata:  The FileMetadata describing the file being reassembled.
-        buffer:    The pre-allocated bytearray that chunks are written into.
+        path:      The destination path on disk.
         received:  Set of sequence numbers that have been successfully written.
     """
 
-    def __init__(self, metadata: FileMetadata) -> None:
+    def __init__(self, metadata: FileMetadata, path: Path) -> None:
+        from engine.storage.file_io import MemoryMappedFile
         self.metadata = metadata
-        self.buffer = bytearray(metadata.size)
+        self.path = path
         self.received: set[int] = set()
+        self._mmap_ctx = MemoryMappedFile(path, write=True, size=metadata.size)
+        self.buffer = self._mmap_ctx.__enter__()
 
-    def write_chunk(self, chunk: Chunk) -> None:
+    async def write_chunk(self, chunk: Chunk) -> None:
         """Write a chunk's data at the correct byte offset.
 
-        Validates the chunk's SHA-256 hash before writing.  Duplicate
-        writes (same seq already received) are silently skipped.
+        Validates the chunk's SHA-256 hash before writing in a background thread.
+        Duplicate writes (same seq already received) are silently skipped.
 
         Args:
             chunk: The chunk to write.
@@ -99,8 +109,10 @@ class ChunkAssembler:
                 f"[0, {self.metadata.chunk_count})"
             )
 
-        # verify per-chunk hash
-        actual_sha = hashlib.sha256(chunk.data).hexdigest()
+        # verify per-chunk hash in a background thread
+        loop = asyncio.get_running_loop()
+        actual_sha = await loop.run_in_executor(None, _hash_piece, chunk.data)
+        
         if actual_sha != chunk.sha256:
             raise ValueError(
                 f"Chunk {chunk.seq} hash mismatch: "
@@ -130,6 +142,13 @@ class ChunkAssembler:
             return 1.0
         return len(self.received) / self.metadata.chunk_count
 
+    def close(self) -> None:
+        """Flush and close the memory-mapped file."""
+        if self.is_complete and isinstance(self.buffer, memoryview):
+            # Not strictly necessary to flush, but good practice
+            pass
+        self._mmap_ctx.__exit__(None, None, None)
+
     def to_bytes(self) -> bytes:
         """Return the reassembled file as an immutable bytes object.
 
@@ -142,4 +161,3 @@ class ChunkAssembler:
                 f"received {len(self.received)}/{self.metadata.chunk_count} chunks"
             )
         return bytes(self.buffer)
-

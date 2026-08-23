@@ -11,7 +11,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 
-from desktop.network.hotspot import HOTSPOT_SSID_PREFIX
+from desktop.network.hotspot import HOTSPOT_SSID_PREFIX, ANDROID_HOTSPOT_PREFIX
 
 logger = logging.getLogger("nearshare.engine.network")
 
@@ -21,14 +21,16 @@ class ScannedNetwork:
     """A Wi-Fi network found during scanning.
 
     Attributes:
-        ssid:     The network SSID.
-        signal:   Signal strength (0-100).
-        security: Security type string (e.g. "WPA2").
+        ssid:       The network SSID.
+        signal:     Signal strength (0-100).
+        security:   Security type string (e.g. "WPA2").
+        is_android: True if this is an Android LocalOnlyHotspot (AndroidShare_*).
     """
 
     ssid: str
     signal: int
     security: str
+    is_android: bool = False
 
 
 def scan_wifi_networks() -> list[ScannedNetwork]:
@@ -81,24 +83,31 @@ def scan_wifi_networks() -> list[ScannedNetwork]:
             signal = 0
 
         security = parts[2] if len(parts) > 2 else ""
-        networks.append(ScannedNetwork(ssid=ssid, signal=signal, security=security))
+        is_android = ssid.startswith(ANDROID_HOTSPOT_PREFIX)
+        networks.append(ScannedNetwork(ssid=ssid, signal=signal, security=security, is_android=is_android))
 
     networks.sort(key=lambda n: n.signal, reverse=True)
     return networks
 
 
 def find_nearshare_hotspots(networks: list[ScannedNetwork] | None = None) -> list[ScannedNetwork]:
-    """Filter a scan result for NearShare hotspots.
+    """Filter a scan result for NearShare hotspots (both PC and Android).
+
+    Matches SSIDs starting with the NearShare prefix (ns# / NearShare-)
+    as well as Android LocalOnlyHotspot SSIDs (AndroidShare_*).
 
     If no network list is provided, performs a fresh scan.
 
     Returns:
-        NearShare hotspots sorted by signal strength.
+        NearShare-compatible hotspots sorted by signal strength.
     """
     if networks is None:
         networks = scan_wifi_networks()
 
-    return [n for n in networks if n.ssid.startswith(HOTSPOT_SSID_PREFIX)]
+    return [
+        n for n in networks
+        if n.ssid.startswith(HOTSPOT_SSID_PREFIX) or n.ssid.startswith(ANDROID_HOTSPOT_PREFIX)
+    ]
 
 
 def connect_to_hotspot(ssid: str, password: str) -> bool:

@@ -14,9 +14,9 @@ from typing import NewType
 
 # Constants
 
-DEFAULT_CHUNK_SIZE: int = 262_144  # 256 KB
+DEFAULT_CHUNK_SIZE: int = 65_536  # 64 KB — Android's platform-channel transport caps near 1MB, keep well under it
 DEFAULT_PORT: int = 47_321
-DEFAULT_SEND_WINDOW: int = 32
+DEFAULT_SEND_WINDOW: int = 128
 PROTOCOL_VERSION: int = 1
 DISCOVERY_TIMEOUT_S: float = 15.0
 RESUME_TIMEOUT_S: float = 30.0
@@ -94,7 +94,7 @@ class FileMetadata:
         mime_type:  Best-guess MIME type, or None if unknown.
         sha256:     Hex-encoded SHA-256 of the whole file, or None if not
                     yet computed.
-        chunk_size: Negotiated chunk size in bytes (default 256 KB).
+        chunk_size: Negotiated chunk size in bytes (default 64 KB).
         chunk_count: Number of chunks (auto-computed if omitted).
     """
 

@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from engine.types import (
+    DEFAULT_CHUNK_SIZE,
     FileMetadata,
     TransferDirection,
     TransferState,
@@ -97,7 +98,7 @@ class TransferSession:
         acked = self.ack_bitmaps.get(file_index, set())
         return expected - acked
 
-    def get_file_bytes_acked(self, file_index: int, chunk_size: int = 262144) -> int:
+    def get_file_bytes_acked(self, file_index: int, chunk_size: int = DEFAULT_CHUNK_SIZE) -> int:
         """Calculate the total bytes acked for this file so far."""
         if file_index < 0 or file_index >= len(self.files):
             return 0
